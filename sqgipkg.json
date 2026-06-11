@@ -1,0 +1,19 @@
+{
+  "name": "Dough",
+  "entry": "main.nut",
+  "script_dirs": [
+    "."
+  ],
+  "resources": [
+    "assets"
+  ],
+  "libraries": [
+    "/home/sam/Programming/SpinoDB/builddir/libspino-1.2.so"
+  ],
+  "typelibs": [
+    "/home/sam/Programming/SpinoDB/builddir/Spino-1.2.typelib"
+  ],
+  "windows": {
+    "gdk_backend": "win32"
+  }
+}
