@@ -19,6 +19,7 @@ class DoughApplication {
     date_label = null
     dashboard_area = null
     status_label = null
+    active_file_chooser = null
     smoke_test = false
 
     constructor(options = null) {
@@ -109,6 +110,94 @@ class DoughApplication {
 
     function first_account_id() {
         return this.document.accounts.len() == 0 ? "" : this.document.accounts[0].id
+    }
+
+    function account_label(account) {
+        if (account == null) return "No account"
+        local name = account.name.len() > 0 ? account.name : "Unnamed account"
+        if (account.number.len() > 0) return name + " - " + account.number
+        return name
+    }
+
+    function account_name_for(id) {
+        local account = this.document.find_account(id)
+        if (account != null) return this.account_label(account)
+        return id != null && id.len() > 0 ? id : "No account"
+    }
+
+    function account_options(include_all = false, include_none = false) {
+        local ids = []
+        local labels = []
+        if (include_all) {
+            ids.push("")
+            labels.push("All accounts")
+        }
+        if (include_none) {
+            ids.push("")
+            labels.push("No account")
+        }
+        foreach (account in this.document.accounts) {
+            ids.push(account.id)
+            labels.push(this.account_label(account))
+        }
+        if (ids.len() == 0) {
+            ids.push("")
+            labels.push("No accounts")
+        }
+        return { ids = ids, labels = labels }
+    }
+
+    function index_for_value(values, value, fallback = 0) {
+        for (local i = 0; i < values.len(); i = i + 1) {
+            if (values[i] == value) return i
+        }
+        return fallback
+    }
+
+    function dropdown_value(values, dropdown, fallback = "") {
+        local index = dropdown.get_selected()
+        if (index < 0 || index >= values.len()) return fallback
+        return values[index]
+    }
+
+    function type_label(type) {
+        if (type == "income") return "Income"
+        if (type == "expense") return "Expense"
+        if (type == "transfer") return "Transfer"
+        return type
+    }
+
+    function transaction_account_label(txn) {
+        if (txn.type == "transfer" && txn.transfer_account_id.len() > 0)
+            return this.account_name_for(txn.account_id) + " -> " + this.account_name_for(txn.transfer_account_id)
+        return this.account_name_for(txn.account_id)
+    }
+
+    function transaction_envelope_label(txn) {
+        if (txn.type == "transfer") return "Transfer"
+        local folder = this.document.folder_label(txn.type, txn.folder_id)
+        local envelope = this.document.envelope_label(txn.type, txn.folder_id, txn.envelope_id, "")
+        if (folder.len() > 0 && envelope.len() > 0) return folder + " / " + envelope
+        if (folder.len() > 0) return folder
+        if (txn.folder_id.len() > 0 || txn.envelope_id.len() > 0) return txn.folder_id + "/" + txn.envelope_id
+        return "Unassigned"
+    }
+
+    function transaction_amount_label(txn) {
+        local prefix = txn.type == "income" ? "+" : "-"
+        if (txn.type == "transfer") prefix = "-"
+        return prefix + this.money(txn.amount)
+    }
+
+    function labeled_control(label_text, control) {
+        local row = Gtk.Box.new(Gtk.Orientation.horizontal, 10)
+        local label = Gtk.Label.new(label_text)
+        label.set_xalign(0.0)
+        label.set_size_request(120, -1)
+        row.append(label)
+        control.set_hexpand(true)
+        row.append(control)
+        return row
     }
 
     function first_envelope_path(type) {
@@ -364,7 +453,9 @@ class DoughApplication {
         toolbar.set_margin_end(8)
 
         toolbar.append(this.ui.action_button("New", "icon.png", function() { this.new_document() }.bindenv(this)))
+        toolbar.append(this.ui.action_button("Sample", "report.png", function() { this.load_sample_document() }.bindenv(this)))
         toolbar.append(this.ui.action_button("Accounts", "books.png", function() { this.show_accounts() }.bindenv(this)))
+        toolbar.append(this.ui.action_button("Transactions", "report.png", function() { this.show_transactions() }.bindenv(this)))
         toolbar.append(this.ui.action_button("Import", "report.png", function() { this.show_import_options() }.bindenv(this)))
         toolbar.append(this.ui.action_button("Budget", "budget.png", function() { this.show_budget() }.bindenv(this)))
         toolbar.append(this.ui.action_button("Report", "report.png", function() { this.show_budget_report() }.bindenv(this)))
@@ -483,20 +574,35 @@ class DoughApplication {
         return root
     }
 
+    function add_empty_list_row(list, text) {
+        local row = Gtk.ListBoxRow.new()
+        local label = this.ui.label(text, "dim-label")
+        label.set_margin_top(14)
+        label.set_margin_bottom(14)
+        label.set_margin_start(12)
+        label.set_margin_end(12)
+        row.set_child(label)
+        list.append(row)
+    }
+
     function show_accounts() {
         local root = this.module_window(
             "Accounts",
-            "Accounts, transactions, filters, and QIF import/export.",
+            "Account setup and opening balances.",
             "books.png")
 
         root.append(this.ui.label("Accounts", "title-3"))
         local list_data = this.ui.scrolled_list()
-        foreach (account in this.document.accounts)
-            this.add_account_editor_row(list_data.list, account)
+        if (this.document.accounts.len() == 0)
+            this.add_empty_list_row(list_data.list, "No accounts yet.")
+        else
+            foreach (account in this.document.accounts)
+                this.add_account_editor_row(list_data.list, account)
         root.append(list_data.scroll)
 
         local account_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         account_actions.append(this.ui.plain_button("Add Account", function() {
+            if (this.document.accounts.len() == 0) this.clear_listbox(list_data.list)
             local id = this.make_id("account")
             local account = Models.Account(id, "New Account", "", 0.0)
             this.document.add_account(account)
@@ -504,29 +610,39 @@ class DoughApplication {
             name_entry.grab_focus()
             this.persist_document("Added account and stored it in Spinodb.")
         }.bindenv(this)))
+        account_actions.append(this.ui.plain_button("Transactions", function() {
+            this.show_transactions()
+        }.bindenv(this)))
         root.append(account_actions)
 
-        root.append(this.ui.label("Transactions", "title-3"))
+        this.show_window("Accounts", root, 900, 420)
+    }
+
+    function show_transactions() {
+        local root = this.module_window(
+            "Transactions",
+            "Review, filter, import, and export transactions.",
+            "report.png")
 
         local filter_box = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         local search_entry = Gtk.Entry.new()
         search_entry.set_hexpand(true)
-        search_entry.set_placeholder_text("Search description")
+        search_entry.set_placeholder_text("Search transactions")
         local start_entry = Gtk.Entry.new()
         start_entry.set_placeholder_text("Start date")
         local end_entry = Gtk.Entry.new()
         end_entry.set_placeholder_text("End date")
-        local account_filter_entry = Gtk.Entry.new()
-        account_filter_entry.set_placeholder_text("Account")
-        local type_filter_entry = Gtk.Entry.new()
-        type_filter_entry.set_placeholder_text("Type")
+        local account_filter = this.account_options(true, false)
+        local account_filter_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_filter.labels), null)
+        local type_filter_values = ["", "income", "expense", "transfer"]
+        local type_filter_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["All types", "Income", "Expense", "Transfer"]), null)
         local path_filter_entry = Gtk.Entry.new()
-        path_filter_entry.set_placeholder_text("Envelope path")
+        path_filter_entry.set_placeholder_text("Envelope")
         filter_box.append(search_entry)
         filter_box.append(start_entry)
         filter_box.append(end_entry)
-        filter_box.append(account_filter_entry)
-        filter_box.append(type_filter_entry)
+        filter_box.append(account_filter_dropdown)
+        filter_box.append(type_filter_dropdown)
         filter_box.append(path_filter_entry)
         root.append(filter_box)
 
@@ -539,21 +655,25 @@ class DoughApplication {
                 search_entry.get_text(),
                 start_entry.get_text(),
                 end_entry.get_text(),
-                account_filter_entry.get_text(),
-                type_filter_entry.get_text(),
+                this.dropdown_value(account_filter.ids, account_filter_dropdown),
+                this.dropdown_value(type_filter_values, type_filter_dropdown),
                 path_filter_entry.get_text())
         }.bindenv(this)
 
         search_entry.connect("changed", refresh_transactions)
         start_entry.connect("changed", refresh_transactions)
         end_entry.connect("changed", refresh_transactions)
-        account_filter_entry.connect("changed", refresh_transactions)
-        type_filter_entry.connect("changed", refresh_transactions)
+        account_filter_dropdown.connect("notify::selected", function(_) { refresh_transactions() })
+        type_filter_dropdown.connect("notify::selected", function(_) { refresh_transactions() })
         path_filter_entry.connect("changed", refresh_transactions)
         refresh_transactions()
 
         local transaction_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
-        transaction_actions.append(this.ui.plain_button("Add Transaction", function() {
+        local transaction_button = this.ui.plain_button("Add Transaction", function() {
+            if (this.document.accounts.len() == 0) {
+                this.set_status("Add an account before recording transactions.")
+                return
+            }
             local path = this.first_envelope_path("expense")
             local txn = Models.Transaction(
                 this.make_id("txn"),
@@ -564,10 +684,10 @@ class DoughApplication {
                 path.envelope_id,
                 "New transaction",
                 0.0)
-            this.document.add_transaction(txn)
-            refresh_transactions()
-            this.persist_document("Added transaction and stored it in Spinodb.")
-        }.bindenv(this)))
+            this.show_transaction_editor(txn, refresh_transactions, true)
+        }.bindenv(this))
+        transaction_button.set_sensitive(this.document.accounts.len() > 0)
+        transaction_actions.append(transaction_button)
 
         transaction_actions.append(this.ui.plain_button("Import CSV/QIF", function() {
             this.show_import_options(refresh_transactions)
@@ -582,7 +702,7 @@ class DoughApplication {
         }.bindenv(this)))
         root.append(transaction_actions)
 
-        this.show_window("Accounts", root)
+        this.show_window("Transactions", root, 1180, 760)
     }
 
     function add_account_editor_row(list, account) {
@@ -656,15 +776,19 @@ class DoughApplication {
                                         account_filter = "", type_filter = "",
                                         path_filter = "") {
         if (search != null && search.len() > 0) {
-            if (txn.description.tolower().find(search.tolower()) == null) return false
+            local needle = search.tolower()
+            local haystack = txn.description + " " +
+                this.transaction_account_label(txn) + " " +
+                this.transaction_envelope_label(txn)
+            if (haystack.tolower().find(needle) == null) return false
         }
         if (start_date != null && start_date.len() > 0 && txn.date < start_date) return false
         if (end_date != null && end_date.len() > 0 && txn.date > end_date) return false
         if (account_filter != null && account_filter.len() > 0 && !txn.affects_account(account_filter)) return false
         if (type_filter != null && type_filter.len() > 0 && txn.type != type_filter) return false
         if (path_filter != null && path_filter.len() > 0) {
-            local path = txn.folder_id + "/" + txn.envelope_id
-            if (path.find(path_filter) == null) return false
+            local path = (txn.folder_id + "/" + txn.envelope_id + " " + this.transaction_envelope_label(txn)).tolower()
+            if (path.find(path_filter.tolower()) == null) return false
         }
         return true
     }
@@ -673,119 +797,186 @@ class DoughApplication {
                                        account_filter = "", type_filter = "",
                                        path_filter = "") {
         this.clear_listbox(list)
+        this.add_transaction_header_row(list)
+        local count = 0
         foreach (txn in this.document.transactions) {
             if (this.transaction_matches_filter(txn, search, start_date, end_date,
-                    account_filter, type_filter, path_filter))
-                this.add_transaction_editor_row(list, txn)
+                    account_filter, type_filter, path_filter)) {
+                count = count + 1
+                this.add_transaction_row(list, txn, function() {
+                    this.populate_transaction_rows(list, search, start_date, end_date,
+                        account_filter, type_filter, path_filter)
+                }.bindenv(this))
+            }
         }
+        if (count == 0)
+            this.add_empty_list_row(list, "No transactions match these filters.")
     }
 
-    function add_transaction_editor_row(list, txn) {
+    function add_transaction_header_row(list) {
         local row = Gtk.ListBoxRow.new()
-        local box = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
-        box.set_margin_top(8)
-        box.set_margin_bottom(8)
+        local box = Gtk.Box.new(Gtk.Orientation.horizontal, 12)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
         box.set_margin_start(10)
         box.set_margin_end(10)
 
-        local date_entry = Gtk.Entry.new()
-        date_entry.set_placeholder_text("Date")
-        date_entry.set_text(txn.date)
-        date_entry.connect("changed", function() {
-            txn.date = date_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(date_entry)
-
-        local account_entry = Gtk.Entry.new()
-        account_entry.set_placeholder_text("Account ID")
-        account_entry.set_text(txn.account_id)
-        account_entry.connect("changed", function() {
-            txn.account_id = account_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(account_entry)
-
-        local type_entry = Gtk.Entry.new()
-        type_entry.set_placeholder_text("income/expense/transfer")
-        type_entry.set_text(txn.type)
-        type_entry.connect("changed", function() {
-            txn.type = type_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(type_entry)
-
-        local path_entry = Gtk.Entry.new()
-        path_entry.set_hexpand(true)
-        path_entry.set_placeholder_text("folder_id/envelope_id")
-        path_entry.set_text(txn.folder_id + "/" + txn.envelope_id)
-        path_entry.connect("changed", function() {
-            local text = path_entry.get_text()
-            local slash = text.find("/")
-            if (slash != null) {
-                txn.folder_id = text.slice(0, slash)
-                txn.envelope_id = text.slice(slash + 1)
-                this.persist_document()
-            }
-        }.bindenv(this))
-        box.append(path_entry)
-
-        box.append(this.ui.plain_button("Auto", function() {
-            local rule = this.match_import_rule(txn.description, txn.type)
-            if (rule == null) {
-                this.set_status("No import rule matched " + txn.description)
-                return
-            }
-            txn.type = rule.type
-            txn.folder_id = rule.folder_id
-            txn.envelope_id = rule.envelope_id
-            type_entry.set_text(txn.type)
-            path_entry.set_text(txn.folder_id + "/" + txn.envelope_id)
-            this.persist_document("Matched " + txn.description + " to " + rule.name + ".")
-        }.bindenv(this)))
-
-        local desc_entry = Gtk.Entry.new()
-        desc_entry.set_hexpand(true)
-        desc_entry.set_placeholder_text("Description")
-        desc_entry.set_text(txn.description)
-        desc_entry.connect("changed", function() {
-            txn.description = desc_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(desc_entry)
-
-        local amount_entry = Gtk.Entry.new()
-        amount_entry.set_placeholder_text("Amount")
-        amount_entry.set_text(this.amount_text(txn.amount))
-        amount_entry.connect("changed", function() {
-            local value = this.parse_amount(amount_entry.get_text())
-            if (value == null) return
-            txn.amount = value
-            this.persist_document()
-        }.bindenv(this))
-        box.append(amount_entry)
-
-        local transfer_entry = Gtk.Entry.new()
-        transfer_entry.set_placeholder_text("Transfer to")
-        transfer_entry.set_text(txn.transfer_account_id)
-        transfer_entry.connect("changed", function() {
-            txn.transfer_account_id = transfer_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(transfer_entry)
-
-        box.append(this.ui.plain_button("Splits", function() {
-            this.show_transaction_splits(txn)
-        }.bindenv(this)))
-
-        box.append(this.ui.plain_button("Delete", function() {
-            this.remove_array_item_by_id(this.document.transactions, txn.id)
-            list.remove(row)
-            this.persist_document("Deleted transaction.")
-        }.bindenv(this)))
+        local date = this.ui.label("Date", "dim-label")
+        date.set_size_request(96, -1)
+        box.append(date)
+        local details = this.ui.label("Transaction", "dim-label")
+        details.set_hexpand(true)
+        box.append(details)
+        local amount = Gtk.Label.new("Amount")
+        amount.set_xalign(1.0)
+        amount.set_size_request(110, -1)
+        amount.add_css_class("dim-label")
+        box.append(amount)
+        local actions = this.ui.label("Actions", "dim-label")
+        actions.set_size_request(180, -1)
+        box.append(actions)
 
         row.set_child(box)
         list.append(row)
+    }
+
+    function add_transaction_row(list, txn, refresh = null) {
+        local row = Gtk.ListBoxRow.new()
+        local box = Gtk.Box.new(Gtk.Orientation.horizontal, 12)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+
+        local date_label = Gtk.Label.new(txn.date)
+        date_label.set_xalign(0.0)
+        date_label.set_size_request(96, -1)
+        box.append(date_label)
+
+        local details = Gtk.Box.new(Gtk.Orientation.vertical, 3)
+        details.set_hexpand(true)
+        local description = this.ui.label(txn.description.len() > 0 ? txn.description : "Untitled transaction")
+        description.set_wrap(true)
+        details.append(description)
+        local meta = this.ui.label(
+            this.transaction_account_label(txn) + " | " +
+            this.type_label(txn.type) + " | " +
+            this.transaction_envelope_label(txn),
+            "dim-label")
+        meta.set_wrap(true)
+        details.append(meta)
+        box.append(details)
+
+        local amount = Gtk.Label.new(this.transaction_amount_label(txn))
+        amount.set_xalign(1.0)
+        amount.set_size_request(110, -1)
+        box.append(amount)
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 6)
+        actions.set_size_request(180, -1)
+        actions.append(this.ui.plain_button("Edit", function() {
+            this.show_transaction_editor(txn, refresh)
+        }.bindenv(this)))
+        actions.append(this.ui.plain_button("Splits", function() {
+            this.show_transaction_splits(txn)
+        }.bindenv(this)))
+
+        actions.append(this.ui.plain_button("Delete", function() {
+            this.remove_array_item_by_id(this.document.transactions, txn.id)
+            list.remove(row)
+            this.persist_document("Deleted transaction.")
+            if (refresh != null) refresh()
+        }.bindenv(this)))
+        box.append(actions)
+
+        row.set_child(box)
+        list.append(row)
+    }
+
+    function show_transaction_editor(txn, refresh = null, add_on_save = false) {
+        local root = this.module_window(
+            add_on_save ? "Add Transaction" : "Edit Transaction",
+            "Transaction details and account assignment.",
+            "report.png")
+
+        local date_entry = Gtk.Entry.new()
+        date_entry.set_text(txn.date)
+        root.append(this.labeled_control("Date", date_entry))
+
+        local account_opts = this.account_options(false, true)
+        local account_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_opts.labels), null)
+        account_dropdown.set_selected(this.index_for_value(account_opts.ids, txn.account_id, 0))
+        root.append(this.labeled_control("Account", account_dropdown))
+
+        local type_values = ["income", "expense", "transfer"]
+        local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Income", "Expense", "Transfer"]), null)
+        type_dropdown.set_selected(this.index_for_value(type_values, txn.type, 1))
+        root.append(this.labeled_control("Type", type_dropdown))
+
+        local path_entry = Gtk.Entry.new()
+        path_entry.set_placeholder_text("folder_id/envelope_id")
+        path_entry.set_text(txn.folder_id + "/" + txn.envelope_id)
+        root.append(this.labeled_control("Envelope", path_entry))
+
+        local description_entry = Gtk.Entry.new()
+        description_entry.set_text(txn.description)
+        root.append(this.labeled_control("Description", description_entry))
+
+        local amount_entry = Gtk.Entry.new()
+        amount_entry.set_text(this.amount_text(txn.amount))
+        root.append(this.labeled_control("Amount", amount_entry))
+
+        local transfer_opts = this.account_options(false, true)
+        local transfer_dropdown = Gtk.DropDown.new(Gtk.StringList.new(transfer_opts.labels), null)
+        transfer_dropdown.set_selected(this.index_for_value(transfer_opts.ids, txn.transfer_account_id, 0))
+        root.append(this.labeled_control("Transfer to", transfer_dropdown))
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        actions.append(this.ui.plain_button("Auto-envelope", function() {
+            local selected_type = this.dropdown_value(type_values, type_dropdown, txn.type)
+            local rule = this.match_import_rule(description_entry.get_text(), selected_type)
+            if (rule == null) {
+                this.set_status("No import rule matched " + description_entry.get_text())
+                return
+            }
+            type_dropdown.set_selected(this.index_for_value(type_values, rule.type, 1))
+            path_entry.set_text(rule.folder_id + "/" + rule.envelope_id)
+            this.set_status("Matched " + description_entry.get_text() + " to " + rule.name + ".")
+        }.bindenv(this)))
+
+        local win = null
+        actions.append(this.ui.plain_button("Save", function() {
+            local amount = this.parse_amount(amount_entry.get_text())
+            if (amount == null) {
+                this.set_status("Enter a valid transaction amount.")
+                return
+            }
+
+            txn.date = date_entry.get_text()
+            txn.account_id = this.dropdown_value(account_opts.ids, account_dropdown)
+            txn.type = this.dropdown_value(type_values, type_dropdown, txn.type)
+            txn.description = description_entry.get_text()
+            txn.amount = amount
+            txn.transfer_account_id = this.dropdown_value(transfer_opts.ids, transfer_dropdown)
+
+            local path_text = path_entry.get_text()
+            local slash = path_text.find("/")
+            if (slash != null) {
+                txn.folder_id = path_text.slice(0, slash)
+                txn.envelope_id = path_text.slice(slash + 1)
+            } else {
+                txn.folder_id = ""
+                txn.envelope_id = ""
+            }
+
+            if (add_on_save) this.document.add_transaction(txn)
+            this.persist_document(add_on_save ? "Added transaction." : "Updated transaction.")
+            if (refresh != null) refresh()
+            if (win != null) win.close()
+        }.bindenv(this)))
+        root.append(actions)
+
+        win = this.show_window(add_on_save ? "Add Transaction" : "Edit Transaction", root, 680, 480)
     }
 
     function show_transaction_splits(txn) {
@@ -1004,24 +1195,84 @@ class DoughApplication {
         this.set_status("Exported " + this.document.transactions.len() + " transaction(s) to " + path)
     }
 
+    function string_ends_with(text, suffix) {
+        if (text == null || suffix == null) return false
+        if (text.len() < suffix.len()) return false
+        return text.slice(text.len() - suffix.len()) == suffix
+    }
+
+    function import_file_filter(name, patterns) {
+        local filter = Gtk.FileFilter.new()
+        filter.set_name(name)
+        foreach (pattern in patterns)
+            filter.add_pattern(pattern)
+        return filter
+    }
+
+    function choose_import_file(path_entry, format_dropdown, on_chosen = null) {
+        local chooser = Gtk.FileChooserNative.new(
+            "Choose CSV or QIF File",
+            this.window,
+            Gtk.FileChooserAction.open,
+            "Choose",
+            "Cancel")
+
+        local combined_filter = this.import_file_filter(
+            "CSV and QIF files",
+            ["*.csv", "*.CSV", "*.qif", "*.QIF"])
+        local csv_filter = this.import_file_filter("CSV files", ["*.csv", "*.CSV"])
+        local qif_filter = this.import_file_filter("QIF files", ["*.qif", "*.QIF"])
+
+        chooser.add_filter(combined_filter)
+        chooser.add_filter(csv_filter)
+        chooser.add_filter(qif_filter)
+        chooser.set_filter(format_dropdown.get_selected() == 1 ? qif_filter : csv_filter)
+
+        this.active_file_chooser = chooser
+        chooser.connect("response", function(response_id) {
+            if (response_id == Gtk.ResponseType.accept || response_id == Gtk.ResponseType.ok) {
+                local file = chooser.get_file()
+                if (file != null) {
+                    local path = file.get_path()
+                    if (path != null && path.len() > 0) {
+                        path_entry.set_text(path)
+                        local lower = path.tolower()
+                        if (this.string_ends_with(lower, ".qif")) format_dropdown.set_selected(1)
+                        else if (this.string_ends_with(lower, ".csv")) format_dropdown.set_selected(0)
+                        if (on_chosen != null) on_chosen(path)
+                    }
+                }
+            }
+            chooser.destroy()
+            this.active_file_chooser = null
+        }.bindenv(this))
+        chooser.show()
+    }
+
     function show_import_options(refresh_transactions = null) {
         local root = this.module_window(
             "Import Transactions",
             "Import CSV or QIF transactions and assign envelopes with regex match rules.",
             "report.png")
 
+        local run_import = null
         local source_box = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         local path_entry = Gtk.Entry.new()
         path_entry.set_hexpand(true)
         path_entry.set_placeholder_text("CSV or QIF path")
         local format_list = Gtk.StringList.new(["CSV", "QIF"])
         local format_dropdown = Gtk.DropDown.new(format_list, null)
-        local account_entry = Gtk.Entry.new()
-        account_entry.set_placeholder_text("Account ID")
-        account_entry.set_text(this.first_account_id())
+        local account_opts = this.account_options(false, true)
+        local account_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_opts.labels), null)
+        account_dropdown.set_selected(this.index_for_value(account_opts.ids, this.first_account_id(), 0))
         source_box.append(path_entry)
+        source_box.append(this.ui.plain_button("Choose & Import", function() {
+            this.choose_import_file(path_entry, format_dropdown, function(path) {
+                if (run_import != null) run_import()
+            })
+        }.bindenv(this)))
         source_box.append(format_dropdown)
-        source_box.append(account_entry)
+        source_box.append(account_dropdown)
         root.append(source_box)
 
         local csv_box = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
@@ -1051,12 +1302,27 @@ class DoughApplication {
         csv_box.append(skip_header)
         root.append(csv_box)
 
-        local import_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
-        import_actions.append(this.ui.plain_button("Import", function() {
+        local import_status = this.ui.label("", "dim-label")
+
+        run_import = function() {
+            local path = path_entry.get_text()
+            if (path == null || path.len() == 0) {
+                import_status.set_text("Choose a CSV or QIF file before importing.")
+                this.set_status("Choose a CSV or QIF file before importing.")
+                return
+            }
+
+            if (!Gio.File.new_for_path(path).query_exists(null)) {
+                import_status.set_text("File not found: " + path)
+                this.set_status("File not found: " + path)
+                return
+            }
+
+            local imported = 0
             if (format_dropdown.get_selected() == 0) {
-                this.import_csv(
-                    path_entry.get_text(),
-                    account_entry.get_text(),
+                imported = this.import_csv(
+                    path,
+                    this.dropdown_value(account_opts.ids, account_dropdown),
                     this.parse_column_index(date_col.get_text(), 0),
                     this.parse_column_index(description_col.get_text(), 1),
                     this.parse_column_index(amount_col.get_text(), 2),
@@ -1065,14 +1331,24 @@ class DoughApplication {
                     this.parse_column_index(credit_col.get_text(), -1),
                     skip_header.get_active())
             } else {
-                this.import_qif(path_entry.get_text(), account_entry.get_text())
+                imported = this.import_qif(path, this.dropdown_value(account_opts.ids, account_dropdown))
             }
+            if (imported == 0)
+                import_status.set_text("No transactions imported. Check the file format and column settings.")
+            else
+                import_status.set_text("Imported " + imported + " transaction(s) from " + path)
             if (refresh_transactions != null) refresh_transactions()
+        }.bindenv(this)
+
+        local import_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        import_actions.append(this.ui.plain_button("Import", function() {
+            run_import()
         }.bindenv(this)))
         import_actions.append(this.ui.plain_button("Export QIF", function() {
             this.export_qif(path_entry.get_text())
         }.bindenv(this)))
         root.append(import_actions)
+        root.append(import_status)
 
         root.append(this.ui.label("Envelope Match Rules", "title-3"))
         local rules_data = this.ui.scrolled_list()
@@ -1819,7 +2095,13 @@ class DoughApplication {
     function new_document() {
         this.document = Models.DoughDocument()
         this.document.title = "New Budget"
+        this.document.regenerate_periods()
         this.persist_document("Created a new Dough document in Spinodb.")
+    }
+
+    function load_sample_document() {
+        this.document = Models.sample_document()
+        this.persist_document("Loaded sample Dough data.")
     }
 
     function quit() {
@@ -1828,6 +2110,7 @@ class DoughApplication {
 
     function run_smoke_test() {
         this.show_accounts()
+        this.show_transactions()
         this.show_budget()
         this.show_budget_report()
         this.show_envelopes()

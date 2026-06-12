@@ -7,6 +7,8 @@
 build/
 build-*/
 dist/
+dist-*/
+.sqgipkg/
 
 *.spino
 *.spino.journal

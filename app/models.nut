@@ -697,6 +697,13 @@ function ensure_default_import_rules(doc) {
 }
 
 function migrate_simple_budgets(doc) {
+    local needs_migration = false
+    foreach (budget in doc.budgets) {
+        if (budget.folder_id == "" || budget.envelope_id == "")
+            needs_migration = true
+    }
+    if (!needs_migration) return
+
     ensure_default_folders(doc)
     foreach (budget in doc.budgets) {
         if (budget.folder_id != "" && budget.envelope_id != "") continue
@@ -757,7 +764,7 @@ function document_from_table(t) {
         doc.add_import_rule(import_rule_from_table(row))
 
     migrate_simple_budgets(doc)
-    ensure_default_import_rules(doc)
+    if (!("import_rules" in t)) ensure_default_import_rules(doc)
     return doc
 }
 

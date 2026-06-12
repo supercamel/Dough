@@ -43,7 +43,9 @@ class SpinodbRepository {
         if (row != null && row.len() > 0)
             return Models.document_from_table(sqgi.json.parse(row))
 
-        local doc = Models.sample_document()
+        local doc = Models.DoughDocument()
+        doc.title = "New Budget"
+        doc.regenerate_periods()
         this.save_document(doc)
         return doc
     }

@@ -1,19 +1,155 @@
 {
   "name": "Dough",
   "entry": "main.nut",
-  "script_dirs": [
-    "."
-  ],
+  "sqgi_source": {
+    "repo": "https://github.com/supercamel/sqgi.git",
+    "ref": "v0.1.2-alpha"
+  },
   "resources": [
     "assets"
   ],
-  "libraries": [
-    "/home/sam/Programming/SpinoDB/builddir/libspino-1.2.so"
-  ],
-  "typelibs": [
-    "/home/sam/Programming/SpinoDB/builddir/Spino-1.2.typelib"
-  ],
+  "linux": {
+    "deb": {
+      "download": true,
+      "suite": "noble",
+      "packages": [
+        "libgtk-4-1",
+        "gir1.2-gtk-4.0",
+        "libgtk-4-dev",
+        "libglib2.0-dev",
+        "libffi-dev",
+        "libcairo2-dev",
+        "libgdk-pixbuf-2.0-0",
+        "gir1.2-gdkpixbuf-2.0",
+        "adwaita-icon-theme",
+        "hicolor-icon-theme",
+        "librsvg2-common",
+        "shared-mime-info"
+      ]
+    },
+    "arches": [
+      {
+        "arch": "x86_64",
+        "build_dir": "build-linux-x86_64",
+        "build": [
+          "cmake -E rm -rf \"$SQGI_LINUX_BUILD_DIR\"",
+          "cmake -S \"$SQGI_SOURCE_DIR\" -B \"$SQGI_LINUX_BUILD_DIR\" -G Ninja ${SQGI_LINUX_CMAKE_TOOLCHAIN:+-DCMAKE_TOOLCHAIN_FILE=\"$SQGI_LINUX_CMAKE_TOOLCHAIN\"} -DCMAKE_BUILD_TYPE=Release -DSQ_ENABLE_JIT=ON",
+          "cmake --build \"$SQGI_LINUX_BUILD_DIR\""
+        ],
+        "inherit_native_projects": false,
+        "native_projects": [
+          {
+            "name": "spino",
+            "repo": "https://github.com/supercamel/spinodb",
+            "dir": ".sqgipkg/native/spinodb",
+            "branch": "master",
+            "update": false,
+            "build": [
+              "sh ../../../packaging/disable-cross-gir.sh meson.build",
+              "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --wipe --prefix /usr --buildtype=release || env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --prefix /usr --buildtype=release",
+              "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson compile -C build-host Spino-1.2.typelib",
+              "meson setup build-linux-x86_64 --wipe --prefix \"$SQGI_LINUX_PREFIX\" --libdir \"lib/$SQGI_LINUX_TRIPLET\" --buildtype=release ${SQGI_LINUX_MESON_CROSS_FILE:+--cross-file \"$SQGI_LINUX_MESON_CROSS_FILE\"} || meson setup build-linux-x86_64 --prefix \"$SQGI_LINUX_PREFIX\" --libdir \"lib/$SQGI_LINUX_TRIPLET\" --buildtype=release ${SQGI_LINUX_MESON_CROSS_FILE:+--cross-file \"$SQGI_LINUX_MESON_CROSS_FILE\"}",
+              "meson compile -C build-linux-x86_64"
+            ],
+            "libraries": [
+              "build-linux-x86_64/libspino-1.2.so"
+            ],
+            "typelibs": [
+              "build-host/Spino-1.2.typelib"
+            ]
+          }
+        ]
+      },
+      {
+        "arch": "aarch64",
+        "build_dir": "build-linux-aarch64",
+        "build": [
+          "cmake -E rm -rf \"$SQGI_LINUX_BUILD_DIR\"",
+          "cmake -S \"$SQGI_SOURCE_DIR\" -B \"$SQGI_LINUX_BUILD_DIR\" -G Ninja ${SQGI_LINUX_CMAKE_TOOLCHAIN:+-DCMAKE_TOOLCHAIN_FILE=\"$SQGI_LINUX_CMAKE_TOOLCHAIN\"} -DCMAKE_BUILD_TYPE=Release -DSQ_ENABLE_JIT=ON",
+          "cmake --build \"$SQGI_LINUX_BUILD_DIR\""
+        ],
+        "inherit_native_projects": false,
+        "native_projects": [
+          {
+            "name": "spino",
+            "repo": "https://github.com/supercamel/spinodb",
+            "dir": ".sqgipkg/native/spinodb",
+            "branch": "master",
+            "update": false,
+            "build": [
+              "sh ../../../packaging/disable-cross-gir.sh meson.build",
+              "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --wipe --prefix /usr --buildtype=release || env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --prefix /usr --buildtype=release",
+              "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson compile -C build-host Spino-1.2.typelib",
+              "meson setup build-linux-aarch64 --wipe --prefix \"$SQGI_LINUX_PREFIX\" --libdir \"lib/$SQGI_LINUX_TRIPLET\" --buildtype=release ${SQGI_LINUX_MESON_CROSS_FILE:+--cross-file \"$SQGI_LINUX_MESON_CROSS_FILE\"} || meson setup build-linux-aarch64 --prefix \"$SQGI_LINUX_PREFIX\" --libdir \"lib/$SQGI_LINUX_TRIPLET\" --buildtype=release ${SQGI_LINUX_MESON_CROSS_FILE:+--cross-file \"$SQGI_LINUX_MESON_CROSS_FILE\"}",
+              "meson compile -C build-linux-aarch64"
+            ],
+            "libraries": [
+              "build-linux-aarch64/libspino-1.2.so"
+            ],
+            "typelibs": [
+              "build-host/Spino-1.2.typelib"
+            ]
+          }
+        ]
+      }
+    ]
+  },
   "windows": {
-    "gdk_backend": "win32"
+    "msys2_prefix": "mingw64",
+    "gdk_backend": "win32",
+    "console": false,
+    "build_dir": "build-windows-x86_64",
+    "build": [
+      "cmake -E rm -rf \"$SQGI_WINDOWS_BUILD_DIR\"",
+      "cmake -S \"$SQGI_SOURCE_DIR\" -B \"$SQGI_WINDOWS_BUILD_DIR\" -G Ninja -DCMAKE_TOOLCHAIN_FILE=\"$SQGI_WIN_CMAKE_TOOLCHAIN\" -DCMAKE_BUILD_TYPE=Release -DSQ_ENABLE_JIT=ON",
+      "cmake --build \"$SQGI_WINDOWS_BUILD_DIR\" --target sqgi sqgi-bin"
+    ],
+    "packages": [
+      "mingw-w64-x86_64-glib2",
+      "mingw-w64-x86_64-gobject-introspection",
+      "mingw-w64-x86_64-gobject-introspection-runtime",
+      "mingw-w64-x86_64-libffi",
+      "mingw-w64-x86_64-cairo",
+      "mingw-w64-x86_64-gtk4",
+      "mingw-w64-x86_64-gdk-pixbuf2",
+      "mingw-w64-x86_64-librsvg",
+      "mingw-w64-x86_64-hicolor-icon-theme",
+      "mingw-w64-x86_64-adwaita-icon-theme",
+      "mingw-w64-x86_64-adwaita-icon-theme-legacy",
+      "mingw-w64-x86_64-gsettings-desktop-schemas"
+    ],
+    "native_projects": [
+      {
+        "name": "spino",
+        "repo": "https://github.com/supercamel/spinodb",
+        "dir": ".sqgipkg/native/spinodb",
+        "branch": "master",
+        "update": false,
+        "build": [
+          "sh ../../../packaging/disable-cross-gir.sh meson.build",
+          "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --wipe --prefix /usr --buildtype=release || env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson setup build-host --prefix /usr --buildtype=release",
+          "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$HOME\" meson compile -C build-host Spino-1.2.typelib",
+          "meson setup build-windows-x86_64 --wipe --prefix \"$SQGI_WINDOWS_PREFIX\" --buildtype=release --cross-file \"$SQGI_MESON_CROSS_FILE\" || meson setup build-windows-x86_64 --prefix \"$SQGI_WINDOWS_PREFIX\" --buildtype=release --cross-file \"$SQGI_MESON_CROSS_FILE\"",
+          "meson compile -C build-windows-x86_64",
+          "sed 's/shared-library=\"libspino-1.2.so\"/shared-library=\"libspino-1.2.dll\"/' build-host/Spino-1.2.gir > build-host/Spino-1.2.windows.gir",
+          "g-ir-compiler build-host/Spino-1.2.windows.gir -o build-host/Spino-1.2.windows.typelib"
+        ],
+        "libraries": [
+          "build-windows-x86_64/libspino-1.2.dll"
+        ],
+        "typelibs": [
+          "build-host/Spino-1.2.windows.typelib"
+        ]
+      }
+    ],
+    "nsis_options": {
+      "installer_name": "Dough-Setup.exe",
+      "install_dir": "$LOCALAPPDATA\\Programs\\Dough",
+      "request_execution_level": "user",
+      "desktop_shortcut": true,
+      "start_menu_shortcut": true,
+      "start_menu_folder": "Dough",
+      "uninstall_registry": true
+    }
   }
 }
