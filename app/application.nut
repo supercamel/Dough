@@ -1,5 +1,6 @@
 local GLib = import("GLib")
 local Gio = import("Gio")
+local Gdk = import("Gdk", "4.0")
 local Gtk = import("Gtk", "4.0")
 local cairo = import("cairo")
 
@@ -28,6 +29,7 @@ class DoughApplication {
         this.ui = Helpers.WidgetFactory(this.assets)
         this.repository = Repository.SpinodbRepository()
         this.document = this.repository.load_document()
+        this.repair_transaction_envelope_paths()
         this.app = Gtk.Application.new("dev.sam.dough", Gio.ApplicationFlags.flags_none)
     }
 
@@ -40,6 +42,8 @@ class DoughApplication {
     }
 
     function activate() {
+        this.configure_app_icon()
+
         this.window = Gtk.ApplicationWindow.new(this.app)
         this.window.set_default_size(1100, 760)
         this.window.set_title("Dough")
@@ -89,6 +93,22 @@ class DoughApplication {
     function set_status(text) {
         if (this.status_label != null) this.status_label.set_text(text)
         print(text + "\n")
+    }
+
+    function configure_app_icon() {
+        local icon_path = this.assets.path("icon.png")
+        if (icon_path == null) return
+
+        local display = Gdk.Display.get_default()
+        if (display != null) {
+            local theme = Gtk.IconTheme.get_for_display(display)
+            theme.add_search_path(GLib.path_get_dirname(icon_path))
+        }
+
+        local basename = GLib.path_get_basename(icon_path)
+        local dot = basename.find(".")
+        local icon_name = dot == null ? basename : basename.slice(0, dot)
+        Gtk.Window.set_default_icon_name(icon_name)
     }
 
     function refresh_title() {
@@ -160,6 +180,39 @@ class DoughApplication {
         return values[index]
     }
 
+    function envelope_path(folder_id, envelope_id) {
+        if (folder_id == null || envelope_id == null) return ""
+        if (folder_id.len() == 0 || envelope_id.len() == 0) return ""
+        return folder_id + "/" + envelope_id
+    }
+
+    function envelope_options(type) {
+        local paths = []
+        local labels = []
+        if (type == "transfer") {
+            paths.push("")
+            labels.push("No envelope")
+            return { paths = paths, labels = labels }
+        }
+
+        foreach (folder in this.document.folders_for_type(type)) {
+            foreach (envelope in folder.envelopes) {
+                local label = folder.name + " / " + envelope.name
+                if (folder.hidden || envelope.hidden) label += " (hidden)"
+                paths.push(folder.id + "/" + envelope.id)
+                labels.push(label)
+            }
+        }
+
+        if (paths.len() == 0) {
+            local path = this.ensure_envelope_path(type)
+            paths.push(path.folder_id + "/" + path.envelope_id)
+            labels.push(path.name)
+        }
+
+        return { paths = paths, labels = labels }
+    }
+
     function type_label(type) {
         if (type == "income") return "Income"
         if (type == "expense") return "Expense"
@@ -179,7 +232,8 @@ class DoughApplication {
         local envelope = this.document.envelope_label(txn.type, txn.folder_id, txn.envelope_id, "")
         if (folder.len() > 0 && envelope.len() > 0) return folder + " / " + envelope
         if (folder.len() > 0) return folder
-        if (txn.folder_id.len() > 0 || txn.envelope_id.len() > 0) return txn.folder_id + "/" + txn.envelope_id
+        if (txn.folder_id.len() > 0 || txn.envelope_id.len() > 0)
+            return "Missing envelope (" + txn.folder_id + "/" + txn.envelope_id + ")"
         return "Unassigned"
     }
 
@@ -215,6 +269,101 @@ class DoughApplication {
             }
         }
         return { type = type, folder_id = "", envelope_id = "", name = "" }
+    }
+
+    function fallback_envelope_name(type) {
+        return type == "income" ? "Uncategorized Income" : "Uncategorized Expense"
+    }
+
+    function ensure_envelope_path(type, folder_id = "", envelope_id = "", fallback_name = null) {
+        if (type == "transfer")
+            return { type = "transfer", folder_id = "", envelope_id = "", name = "Transfer", created = false }
+
+        local requested_folder_id = folder_id == null ? "" : folder_id
+        local requested_envelope_id = envelope_id == null ? "" : envelope_id
+        local existing = this.document.find_envelope(type, requested_folder_id, requested_envelope_id)
+        if (existing != null) {
+            return {
+                type = type,
+                folder_id = requested_folder_id,
+                envelope_id = requested_envelope_id,
+                name = existing.name,
+                created = false
+            }
+        }
+
+        if (requested_folder_id.len() == 0 || requested_envelope_id.len() == 0) {
+            local first = this.first_envelope_path(type)
+            if (first.envelope_id.len() > 0) {
+                return {
+                    type = first.type,
+                    folder_id = first.folder_id,
+                    envelope_id = first.envelope_id,
+                    name = first.name,
+                    created = false
+                }
+            }
+        }
+
+        local folder = requested_folder_id.len() > 0 ?
+            this.document.find_folder(type, requested_folder_id) : null
+        local created = false
+        if (folder == null) {
+            folder = Models.EnvelopeFolder(
+                requested_folder_id.len() > 0 ? requested_folder_id : this.make_id(type + "-folder"),
+                type == "income" ? "Imported Income" : "Imported Expenses",
+                type)
+            if (type == "income") this.document.add_income_folder(folder)
+            else this.document.add_expense_folder(folder)
+            created = true
+        }
+
+        local envelope_name = fallback_name != null && fallback_name.len() > 0 ?
+            fallback_name : this.fallback_envelope_name(type)
+        local envelope = Models.Envelope(
+            requested_envelope_id.len() > 0 ? requested_envelope_id : this.make_id("env"),
+            envelope_name,
+            "Created to repair a transaction envelope assignment")
+        folder.add_envelope(envelope)
+
+        return {
+            type = type,
+            folder_id = folder.id,
+            envelope_id = envelope.id,
+            name = envelope.name,
+            created = true
+        }
+    }
+
+    function import_rule_envelope_path(rule, fallback_type) {
+        if (rule == null) return this.ensure_envelope_path(fallback_type)
+        local type = rule.type.len() > 0 ? rule.type : fallback_type
+        return this.ensure_envelope_path(type, rule.folder_id, rule.envelope_id, rule.name)
+    }
+
+    function repair_transaction_envelope_paths() {
+        local repaired = 0
+        foreach (txn in this.document.transactions) {
+            if (txn.type == "transfer") continue
+            if (this.document.find_envelope(txn.type, txn.folder_id, txn.envelope_id) == null) {
+                local path = this.ensure_envelope_path(txn.type, txn.folder_id, txn.envelope_id, txn.description)
+                txn.type = path.type
+                txn.folder_id = path.folder_id
+                txn.envelope_id = path.envelope_id
+                repaired = repaired + 1
+            }
+
+            foreach (split in txn.splits) {
+                if (this.document.find_envelope(txn.type, split.folder_id, split.envelope_id) == null) {
+                    local split_path = this.ensure_envelope_path(txn.type, split.folder_id, split.envelope_id, split.description)
+                    split.folder_id = split_path.folder_id
+                    split.envelope_id = split_path.envelope_id
+                    repaired = repaired + 1
+                }
+            }
+        }
+        if (repaired > 0) this.repository.save_document(this.document)
+        return repaired
     }
 
     function ensure_folder_for_type(type) {
@@ -417,12 +566,7 @@ class DoughApplication {
         local type = amount < 0.0 ? "expense" : "income"
         if (amount < 0.0) amount = amount * -1.0
         local rule = this.match_import_rule(description, type)
-        local path_info = rule == null ? this.first_envelope_path(type) : {
-            type = rule.type,
-            folder_id = rule.folder_id,
-            envelope_id = rule.envelope_id,
-            name = rule.name
-        }
+        local path_info = this.import_rule_envelope_path(rule, type)
 
         return Models.Transaction(
             this.make_id("import"),
@@ -674,7 +818,7 @@ class DoughApplication {
                 this.set_status("Add an account before recording transactions.")
                 return
             }
-            local path = this.first_envelope_path("expense")
+            local path = this.ensure_envelope_path("expense")
             local txn = Models.Transaction(
                 this.make_id("txn"),
                 this.first_account_id(),
@@ -913,10 +1057,29 @@ class DoughApplication {
         type_dropdown.set_selected(this.index_for_value(type_values, txn.type, 1))
         root.append(this.labeled_control("Type", type_dropdown))
 
-        local path_entry = Gtk.Entry.new()
-        path_entry.set_placeholder_text("folder_id/envelope_id")
-        path_entry.set_text(txn.folder_id + "/" + txn.envelope_id)
-        root.append(this.labeled_control("Envelope", path_entry))
+        local selected_type = this.dropdown_value(type_values, type_dropdown, txn.type)
+        local envelope_opts = this.envelope_options(selected_type)
+        local envelope_dropdown = Gtk.DropDown.new(Gtk.StringList.new(envelope_opts.labels), null)
+        envelope_dropdown.set_selected(this.index_for_value(
+            envelope_opts.paths,
+            this.envelope_path(txn.folder_id, txn.envelope_id),
+            0))
+        envelope_dropdown.set_sensitive(selected_type != "transfer")
+        root.append(this.labeled_control("Envelope", envelope_dropdown))
+
+        local refresh_envelope_dropdown = function(preferred_path = null) {
+            local current_type = this.dropdown_value(type_values, type_dropdown, txn.type)
+            envelope_opts = this.envelope_options(current_type)
+            envelope_dropdown.set_model(Gtk.StringList.new(envelope_opts.labels))
+            local wanted = preferred_path != null ? preferred_path :
+                this.envelope_path(txn.folder_id, txn.envelope_id)
+            envelope_dropdown.set_selected(this.index_for_value(envelope_opts.paths, wanted, 0))
+            envelope_dropdown.set_sensitive(current_type != "transfer")
+        }.bindenv(this)
+
+        type_dropdown.connect("notify::selected", function(_) {
+            refresh_envelope_dropdown()
+        })
 
         local description_entry = Gtk.Entry.new()
         description_entry.set_text(txn.description)
@@ -939,9 +1102,11 @@ class DoughApplication {
                 this.set_status("No import rule matched " + description_entry.get_text())
                 return
             }
-            type_dropdown.set_selected(this.index_for_value(type_values, rule.type, 1))
-            path_entry.set_text(rule.folder_id + "/" + rule.envelope_id)
-            this.set_status("Matched " + description_entry.get_text() + " to " + rule.name + ".")
+            local path = this.import_rule_envelope_path(rule, selected_type)
+            type_dropdown.set_selected(this.index_for_value(type_values, path.type, 1))
+            refresh_envelope_dropdown(path.folder_id + "/" + path.envelope_id)
+            if (path.created) this.persist_document()
+            this.set_status("Matched " + description_entry.get_text() + " to " + path.name + ".")
         }.bindenv(this)))
 
         local win = null
@@ -959,14 +1124,25 @@ class DoughApplication {
             txn.amount = amount
             txn.transfer_account_id = this.dropdown_value(transfer_opts.ids, transfer_dropdown)
 
-            local path_text = path_entry.get_text()
-            local slash = path_text.find("/")
-            if (slash != null) {
-                txn.folder_id = path_text.slice(0, slash)
-                txn.envelope_id = path_text.slice(slash + 1)
-            } else {
+            if (txn.type == "transfer") {
                 txn.folder_id = ""
                 txn.envelope_id = ""
+            } else {
+                local path_text = this.dropdown_value(envelope_opts.paths, envelope_dropdown, "")
+                local slash = path_text.find("/")
+                if (slash == null) {
+                    this.set_status("Choose an envelope for this transaction.")
+                    return
+                }
+                local folder_id = path_text.slice(0, slash)
+                local envelope_id = path_text.slice(slash + 1)
+                local envelope = this.document.find_envelope(txn.type, folder_id, envelope_id)
+                if (envelope == null) {
+                    this.set_status("Envelope path is not real for " + this.type_label(txn.type) + ": " + path_text)
+                    return
+                }
+                txn.folder_id = folder_id
+                txn.envelope_id = envelope_id
             }
 
             if (add_on_save) this.document.add_transaction(txn)
@@ -1004,7 +1180,7 @@ class DoughApplication {
 
         local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         actions.append(this.ui.plain_button("Add Split", function() {
-            local path = this.first_envelope_path(txn.type == "income" ? "income" : "expense")
+            local path = this.ensure_envelope_path(txn.type == "income" ? "income" : "expense")
             local split = Models.TransactionSplit(path.folder_id, path.envelope_id, txn.description, 0.0)
             txn.splits.push(split)
             this.add_split_editor_row(list_data.list, txn, split, refresh)
@@ -1042,8 +1218,14 @@ class DoughApplication {
             local text = path_entry.get_text()
             local slash = text.find("/")
             if (slash != null) {
-                split.folder_id = text.slice(0, slash)
-                split.envelope_id = text.slice(slash + 1)
+                local folder_id = text.slice(0, slash)
+                local envelope_id = text.slice(slash + 1)
+                if (this.document.find_envelope(txn.type, folder_id, envelope_id) == null) {
+                    this.set_status("Split envelope path is not real for " + this.type_label(txn.type) + ": " + text)
+                    return
+                }
+                split.folder_id = folder_id
+                split.envelope_id = envelope_id
                 this.persist_document()
                 if (refresh != null) refresh()
             }
@@ -1357,7 +1539,7 @@ class DoughApplication {
 
         local rule_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         rule_actions.append(this.ui.plain_button("Add Rule", function() {
-            local path = this.first_envelope_path("expense")
+            local path = this.ensure_envelope_path("expense")
             local rule = Models.ImportRule(
                 this.make_id("rule"),
                 "New Rule",
@@ -1439,8 +1621,14 @@ class DoughApplication {
             local text = path_entry.get_text()
             local slash = text.find("/")
             if (slash != null) {
-                rule.folder_id = text.slice(0, slash)
-                rule.envelope_id = text.slice(slash + 1)
+                local folder_id = text.slice(0, slash)
+                local envelope_id = text.slice(slash + 1)
+                if (this.document.find_envelope(type_entry.get_text(), folder_id, envelope_id) == null) {
+                    this.set_status("Rule target is not a real envelope: " + text)
+                    return
+                }
+                rule.folder_id = folder_id
+                rule.envelope_id = envelope_id
                 this.persist_document()
             }
         }.bindenv(this))
@@ -1581,31 +1769,71 @@ class DoughApplication {
         }.bindenv(this))
         box.append(name_entry)
 
-        local type_entry = Gtk.Entry.new()
-        type_entry.set_placeholder_text("Type")
-        type_entry.set_text(envelope.type)
-        type_entry.connect("changed", function() {
-            envelope.type = type_entry.get_text()
+        if (envelope.type != "income" && envelope.type != "expense")
+            envelope.type = "expense"
+        local resolved_path = this.ensure_envelope_path(
+            envelope.type,
+            envelope.folder_id,
+            envelope.envelope_id,
+            envelope.name)
+        envelope.type = resolved_path.type
+        envelope.folder_id = resolved_path.folder_id
+        envelope.envelope_id = resolved_path.envelope_id
+        if (resolved_path.created) this.persist_document()
+
+        local type_values = ["expense", "income"]
+        local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Expense", "Income"]), null)
+        type_dropdown.set_selected(this.index_for_value(type_values, envelope.type, 0))
+        box.append(type_dropdown)
+
+        local envelope_opts = this.envelope_options(envelope.type)
+        local envelope_dropdown = Gtk.DropDown.new(Gtk.StringList.new(envelope_opts.labels), null)
+        envelope_dropdown.set_hexpand(true)
+        envelope_dropdown.set_selected(this.index_for_value(
+            envelope_opts.paths,
+            this.envelope_path(envelope.folder_id, envelope.envelope_id),
+            0))
+        box.append(envelope_dropdown)
+
+        local apply_envelope_selection = function() {
+            local selected_type = this.dropdown_value(type_values, type_dropdown, envelope.type)
+            local path_text = this.dropdown_value(envelope_opts.paths, envelope_dropdown, "")
+            local slash = path_text.find("/")
+            if (slash == null) return
+
+            local folder_id = path_text.slice(0, slash)
+            local envelope_id = path_text.slice(slash + 1)
+            local linked = this.document.find_envelope(selected_type, folder_id, envelope_id)
+            if (linked == null) {
+                this.set_status("Budget envelope selection is no longer available: " + path_text)
+                return
+            }
+
+            envelope.type = selected_type
+            envelope.folder_id = folder_id
+            envelope.envelope_id = envelope_id
+            envelope.name = linked.name
+            if (name_entry.get_text() != linked.name) name_entry.set_text(linked.name)
             this.persist_document()
             if (refresh_budget != null) refresh_budget()
-        }.bindenv(this))
-        box.append(type_entry)
+        }.bindenv(this)
 
-        local path_entry = Gtk.Entry.new()
-        path_entry.set_hexpand(true)
-        path_entry.set_placeholder_text("folder_id/envelope_id")
-        path_entry.set_text(envelope.folder_id + "/" + envelope.envelope_id)
-        path_entry.connect("changed", function() {
-            local text = path_entry.get_text()
-            local slash = text.find("/")
-            if (slash != null) {
-                envelope.folder_id = text.slice(0, slash)
-                envelope.envelope_id = text.slice(slash + 1)
-                this.persist_document()
-                if (refresh_budget != null) refresh_budget()
-            }
-        }.bindenv(this))
-        box.append(path_entry)
+        local refresh_envelope_dropdown = function(preferred_path = null) {
+            local selected_type = this.dropdown_value(type_values, type_dropdown, envelope.type)
+            envelope_opts = this.envelope_options(selected_type)
+            envelope_dropdown.set_model(Gtk.StringList.new(envelope_opts.labels))
+            local wanted = preferred_path != null ? preferred_path :
+                this.envelope_path(envelope.folder_id, envelope.envelope_id)
+            envelope_dropdown.set_selected(this.index_for_value(envelope_opts.paths, wanted, 0))
+        }.bindenv(this)
+
+        type_dropdown.connect("notify::selected", function(_) {
+            refresh_envelope_dropdown()
+            apply_envelope_selection()
+        })
+        envelope_dropdown.connect("notify::selected", function(_) {
+            apply_envelope_selection()
+        })
 
         local allocation_entry = Gtk.Entry.new()
         allocation_entry.set_placeholder_text("Allocated")
@@ -1837,6 +2065,11 @@ class DoughApplication {
                 if (this.document.transactions[i].folder_id == folder.id)
                     this.document.transactions.remove(i)
             }
+            for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
+                if (this.document.import_rules[i].type == type &&
+                    this.document.import_rules[i].folder_id == folder.id)
+                    this.document.import_rules.remove(i)
+            }
             this.populate_envelope_catalog(list, type)
             this.persist_document("Deleted folder and related rows.")
         }.bindenv(this)))
@@ -1899,6 +2132,11 @@ class DoughApplication {
                 local txn = this.document.transactions[i]
                 if (txn.type == type && txn.folder_id == folder.id && txn.envelope_id == envelope.id)
                     this.document.transactions.remove(i)
+            }
+            for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
+                local rule = this.document.import_rules[i]
+                if (rule.type == type && rule.folder_id == folder.id && rule.envelope_id == envelope.id)
+                    this.document.import_rules.remove(i)
             }
             list.remove(row)
             this.persist_document("Deleted envelope and related rows.")

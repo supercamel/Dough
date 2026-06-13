@@ -33,6 +33,7 @@ The SQGI port now has a modular GTK4 application with:
 - Transactions store account, date, type, folder/envelope path, description, amount, transfer account, and optional split rows.
 - Budget records are linked to real folders/envelopes and period labels.
 - Import rules store regex patterns, target type, target folder/envelope, priority, and enabled state.
+- Transaction import and auto-envelope assignment resolve rule targets to real envelopes, repairing missing targets when needed.
 - Settings store title, currency, reserve settings, date format, start date, and period length.
 - Weekly, fortnightly, and monthly period labels are generated from the configured ISO start date.
 - Legacy simple budget rows are migrated into the richer folder/envelope shape on load.
@@ -44,6 +45,7 @@ The SQGI port now has a modular GTK4 application with:
 - Show calculated current balance.
 - Add, edit, delete, and split transactions.
 - Filter transactions by description, date text, account, type, and envelope path.
+- Transaction editing uses account, type, transfer-account, and envelope dropdowns backed by real persisted records.
 - Record income, expense, and transfer transaction types.
 - Import CSV and QIF files.
 - CSV import supports configurable zero-based date, description, amount, memo, debit, and credit columns.
@@ -55,7 +57,8 @@ The SQGI port now has a modular GTK4 application with:
 
 - Add new income and expense envelopes directly from the budget editor.
 - Add existing income or expense envelopes through a chooser window.
-- Edit budget row envelope name, type, folder/envelope path, and allocated amount.
+- Edit budget row envelope name, type, envelope, and allocated amount.
+- Budget type and envelope editing uses dropdowns backed by real persisted folders/envelopes.
 - Remove budget rows.
 - Clear the budget.
 - Copy current budget rows.
@@ -92,6 +95,7 @@ The SQGI port now has a modular GTK4 application with:
 - Import rules are editable from the Import window.
 - Rules can be enabled/disabled, reprioritized, tested against sample text, deleted, added, or reset to defaults.
 - Rules are persisted in Spinodb with the rest of the Dough document.
+- Deleting folders/envelopes removes matching import rules so stale rules do not keep assigning dead envelope IDs.
 
 ## Remaining Gaps
 
