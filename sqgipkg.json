@@ -11,7 +11,7 @@
   "linux": {
     "deb": {
       "download": true,
-      "suite": "noble",
+      "suite": "jammy",
       "packages": [
         "libgtk-4-1",
         "gir1.2-gtk-4.0",
