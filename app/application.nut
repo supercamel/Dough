@@ -35,7 +35,7 @@ class DoughApplication {
     tutorial_step_index = 0
     tutorial_state = null
     smoke_test = false
-    version = "0.1.8"
+    version = "0.1.10"
 
     constructor(options = null) {
         this.smoke_test = options != null && "smoke" in options ? options.smoke : false
