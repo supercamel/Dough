@@ -21,15 +21,29 @@ class DoughApplication {
     dashboard_area = null
     status_label = null
     active_file_chooser = null
+    page_title_label = null
+    content_area = null
+    app_overlay = null
+    overlay_layer = null
+    nav_buttons = null
+    active_page_id = null
+    tutorial_button = null
+    tutorial_popover = null
+    tutorial_step_index = 0
+    tutorial_state = null
     smoke_test = false
+    version = "0.1.7"
 
     constructor(options = null) {
         this.smoke_test = options != null && "smoke" in options ? options.smoke : false
+        local db_path = options != null && "db_path" in options ? options.db_path : null
         this.assets = Assets.AssetLocator()
         this.ui = Helpers.WidgetFactory(this.assets)
-        this.repository = Repository.SpinodbRepository()
+        this.repository = Repository.SpinodbRepository(db_path)
         this.document = this.repository.load_document()
+        this.tutorial_state = this.repository.load_tutorial_state()
         this.repair_transaction_envelope_paths()
+        this.nav_buttons = {}
         this.app = Gtk.Application.new("dev.sam.dough", Gio.ApplicationFlags.flags_none)
     }
 
@@ -42,31 +56,32 @@ class DoughApplication {
     }
 
     function activate() {
+        if (this.window != null) {
+            this.window.present()
+            return
+        }
+
         this.configure_app_icon()
+        this.install_css()
 
         this.window = Gtk.ApplicationWindow.new(this.app)
         this.window.set_default_size(1100, 760)
         this.window.set_title("Dough")
 
         local header = Gtk.HeaderBar.new()
-        header.set_title_widget(Gtk.Label.new("Dough"))
+        this.page_title_label = Gtk.Label.new("Dashboard")
+        this.page_title_label.add_css_class("title-3")
+        header.set_title_widget(this.page_title_label)
+        this.tutorial_button = this.ui.plain_button("Guide", function() { this.start_tutorial() }.bindenv(this))
+        header.pack_start(this.tutorial_button)
         header.pack_end(this.ui.plain_button("About", function() { this.show_about() }.bindenv(this)))
         header.pack_end(this.ui.plain_button("Quit", function() { this.quit() }.bindenv(this)))
         this.window.set_titlebar(header)
 
-        local root = Gtk.Box.new(Gtk.Orientation.vertical, 0)
-        root.append(this.build_dashboard())
-
-        this.status_label = Gtk.Label.new("Spinodb: " + this.repository.db_path)
-        this.status_label.set_xalign(0.0)
-        this.status_label.add_css_class("dim-label")
-        this.status_label.set_margin_top(6)
-        this.status_label.set_margin_bottom(6)
-        this.status_label.set_margin_start(10)
-        this.status_label.set_margin_end(10)
-        root.append(this.status_label)
-
-        this.window.set_child(root)
+        this.app_overlay = Gtk.Overlay.new()
+        this.app_overlay.set_child(this.build_shell())
+        this.window.set_child(this.app_overlay)
+        this.show_dashboard()
         this.refresh_title()
         this.window.present()
 
@@ -109,6 +124,504 @@ class DoughApplication {
         local dot = basename.find(".")
         local icon_name = dot == null ? basename : basename.slice(0, dot)
         Gtk.Window.set_default_icon_name(icon_name)
+    }
+
+    function install_css() {
+        local display = Gdk.Display.get_default()
+        if (display == null) return
+
+        local provider = Gtk.CssProvider.new()
+        provider.load_from_string(
+            ".dough-shell { background: @theme_bg_color; }" +
+            ".dough-nav { padding: 8px; border-bottom: 1px solid @borders; background: @theme_base_color; }" +
+            ".dough-nav button { margin-right: 3px; }" +
+            ".dough-nav button.dough-nav-active { background: @theme_selected_bg_color; color: @theme_selected_fg_color; }" +
+            ".dough-content { background: @theme_bg_color; }" +
+            ".dough-setup { padding: 10px 14px; border-bottom: 1px solid @borders; background: @theme_base_color; }" +
+            ".dough-setup-panel { padding: 4px 0 4px 14px; border-left: 1px solid @borders; }" +
+            ".dough-good { color: #1f7a4d; }" +
+            ".dough-warning { color: #a35a00; }" +
+            ".dough-danger { color: #a32020; }" +
+            ".dough-status { padding: 6px 10px; border-top: 1px solid @borders; background: @theme_base_color; }" +
+            ".dough-overlay-scrim { background: rgba(0, 0, 0, 0.42); }" +
+            ".dough-dialog-card { background: @theme_bg_color; border: 1px solid @borders; border-radius: 8px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.30); }" +
+            ".dough-dialog-header { padding: 10px 12px; border-bottom: 1px solid @borders; }")
+        Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    }
+
+    function build_shell() {
+        local shell = Gtk.Box.new(Gtk.Orientation.vertical, 0)
+        shell.add_css_class("dough-shell")
+
+        shell.append(this.build_navigation())
+
+        this.content_area = Gtk.Box.new(Gtk.Orientation.vertical, 0)
+        this.content_area.set_hexpand(true)
+        this.content_area.set_vexpand(true)
+        this.content_area.add_css_class("dough-content")
+        shell.append(this.content_area)
+
+        this.status_label = Gtk.Label.new("Spinodb: " + this.repository.db_path)
+        this.status_label.set_xalign(0.0)
+        this.status_label.add_css_class("dim-label")
+        this.status_label.add_css_class("dough-status")
+        shell.append(this.status_label)
+
+        return shell
+    }
+
+    function nav_button(text, icon_name, callback) {
+        local button = this.ui.action_button(text, icon_name, callback)
+        button.add_css_class("flat")
+        return button
+    }
+
+    function nav_page_button(page_id, text, icon_name, callback) {
+        local button = this.nav_button(text, icon_name, callback)
+        this.nav_buttons[page_id] <- button
+        return button
+    }
+
+    function build_navigation() {
+        this.nav_buttons = {}
+        local nav = Gtk.Box.new(Gtk.Orientation.horizontal, 6)
+        nav.add_css_class("dough-nav")
+
+        nav.append(this.nav_page_button("dashboard", "Dashboard", "icon.png", function() { this.show_dashboard() }.bindenv(this)))
+        nav.append(this.nav_page_button("accounts", "Accounts", "books.png", function() { this.show_accounts() }.bindenv(this)))
+        nav.append(this.nav_page_button("transactions", "Transactions", "report.png", function() { this.show_transactions() }.bindenv(this)))
+        nav.append(this.nav_page_button("import", "Import", "report.png", function() { this.show_import_options() }.bindenv(this)))
+        nav.append(this.nav_page_button("budget", "Budget", "budget.png", function() { this.show_budget() }.bindenv(this)))
+        nav.append(this.nav_page_button("report", "Report", "report.png", function() { this.show_budget_report() }.bindenv(this)))
+        nav.append(this.nav_page_button("envelopes", "Envelopes", "envelope.png", function() { this.show_envelopes() }.bindenv(this)))
+        nav.append(this.nav_page_button("line", "Line", "linegraph.png", function() { this.show_graph("Line Graphs", "linegraph.png") }.bindenv(this)))
+        nav.append(this.nav_page_button("pie", "Pie", "piechart.png", function() { this.show_graph("Pie Charts", "piechart.png") }.bindenv(this)))
+        nav.append(this.nav_page_button("options", "Options", "interface.png", function() { this.show_options() }.bindenv(this)))
+
+        local scroll = Gtk.ScrolledWindow.new()
+        scroll.set_policy(Gtk.PolicyType.automatic, Gtk.PolicyType.never)
+        scroll.set_child(nav)
+        return scroll
+    }
+
+    function page_id_for_title(title) {
+        if (title == "Dashboard") return "dashboard"
+        if (title == "Accounts") return "accounts"
+        if (title == "Transactions") return "transactions"
+        if (title == "Import Transactions") return "import"
+        if (title == "Edit Budget") return "budget"
+        if (title == "Budget Report") return "report"
+        if (title == "Envelopes") return "envelopes"
+        if (title == "Line Graphs") return "line"
+        if (title == "Pie Charts") return "pie"
+        if (title == "Options") return "options"
+        return null
+    }
+
+    function set_active_page(page_id) {
+        if (this.active_page_id != null && this.active_page_id in this.nav_buttons)
+            this.nav_buttons[this.active_page_id].remove_css_class("dough-nav-active")
+        this.active_page_id = page_id
+        if (this.active_page_id != null && this.active_page_id in this.nav_buttons)
+            this.nav_buttons[this.active_page_id].add_css_class("dough-nav-active")
+    }
+
+    function clear_children(container) {
+        local child = container.get_first_child()
+        while (child != null) {
+            container.remove(child)
+            child = container.get_first_child()
+        }
+    }
+
+    function show_page(title, child, page_id = null) {
+        if (this.content_area == null) return null
+
+        this.close_tutorial_popover()
+        this.close_overlay()
+        this.clear_children(this.content_area)
+        child.set_hexpand(true)
+        child.set_vexpand(true)
+        this.content_area.append(child)
+
+        if (this.page_title_label != null) this.page_title_label.set_text(title)
+        this.set_active_page(page_id != null ? page_id : this.page_id_for_title(title))
+        this.refresh_title()
+        return { close = function() {} }
+    }
+
+    function close_overlay() {
+        if (this.app_overlay != null && this.overlay_layer != null) {
+            this.app_overlay.remove_overlay(this.overlay_layer)
+            this.overlay_layer = null
+        }
+    }
+
+    function show_overlay(title, child, width = 760, height = 520) {
+        if (this.app_overlay == null) return this.show_page(title, child)
+
+        this.close_overlay()
+
+        local layer = Gtk.Overlay.new()
+        layer.set_hexpand(true)
+        layer.set_vexpand(true)
+        layer.set_halign(Gtk.Align.fill)
+        layer.set_valign(Gtk.Align.fill)
+        layer.set_focusable(true)
+
+        local key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", function(_, keyval, keycode, state) {
+            if (keyval == Gdk.KEY_Escape) {
+                this.close_overlay()
+                return true
+            }
+            return false
+        }.bindenv(this))
+        layer.add_controller(key_controller)
+
+        local scrim = Gtk.Box.new(Gtk.Orientation.vertical, 0)
+        scrim.set_hexpand(true)
+        scrim.set_vexpand(true)
+        scrim.add_css_class("dough-overlay-scrim")
+        layer.set_child(scrim)
+
+        local card = Gtk.Box.new(Gtk.Orientation.vertical, 0)
+        card.set_size_request(width, height)
+        card.set_halign(Gtk.Align.center)
+        card.set_valign(Gtk.Align.center)
+        card.add_css_class("dough-dialog-card")
+
+        local header = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        header.add_css_class("dough-dialog-header")
+        local title_label = Gtk.Label.new(title)
+        title_label.set_xalign(0.0)
+        title_label.set_hexpand(true)
+        title_label.add_css_class("title-3")
+        header.append(title_label)
+        header.append(this.ui.plain_button("Close", function() { this.close_overlay() }.bindenv(this)))
+        card.append(header)
+
+        local scroll = Gtk.ScrolledWindow.new()
+        scroll.set_hexpand(true)
+        scroll.set_vexpand(true)
+        scroll.set_child(child)
+        card.append(scroll)
+
+        layer.add_overlay(card)
+        this.app_overlay.add_overlay(layer)
+        this.overlay_layer = layer
+        layer.grab_focus()
+
+        return { close = function() { this.close_overlay() }.bindenv(this) }
+    }
+
+    function confirm_action(title, message, action, action_label = "Delete") {
+        local root = this.ui.padded_box(Gtk.Orientation.vertical, 14, 18)
+        root.append(this.ui.label(title, "title-3"))
+        local copy = this.ui.label(message, "dim-label")
+        copy.set_wrap(true)
+        root.append(copy)
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        actions.append(this.ui.plain_button("Cancel", function() {
+            this.close_overlay()
+        }.bindenv(this)))
+        local confirm = this.ui.plain_button(action_label, function() {
+            this.close_overlay()
+            action()
+        }.bindenv(this))
+        confirm.add_css_class("destructive-action")
+        actions.append(confirm)
+        root.append(actions)
+
+        return this.show_overlay(title, root, 520, 240)
+    }
+
+    function valid_period_settings() {
+        if (this.document.start_date == null || this.document.start_date.len() == 0) return false
+        return this.document.period_length == "weekly" ||
+            this.document.period_length == "fortnightly" ||
+            this.document.period_length == "monthly"
+    }
+
+    function envelope_count(type = null) {
+        local count = 0
+        local folders = []
+        if (type == "income") folders = this.document.income_folders
+        else if (type == "expense") folders = this.document.expense_folders
+        else {
+            foreach (folder in this.document.income_folders) folders.push(folder)
+            foreach (folder in this.document.expense_folders) folders.push(folder)
+        }
+
+        foreach (folder in folders)
+            count = count + folder.envelopes.len()
+        return count
+    }
+
+    function setup_steps() {
+        return [
+            {
+                id = "options",
+                title = "Budget Frame",
+                detail = "Currency, start date, and period length",
+                done = this.valid_period_settings(),
+                action = function() { this.show_options() }.bindenv(this)
+            },
+            {
+                id = "envelopes",
+                title = "Envelope Catalog",
+                detail = "Income and expense categories with real envelope records",
+                done = this.envelope_count("income") > 0 && this.envelope_count("expense") > 0,
+                action = function() { this.show_envelopes() }.bindenv(this)
+            },
+            {
+                id = "accounts",
+                title = "Accounts",
+                detail = "Where money lives and where transactions happen",
+                done = this.document.accounts.len() > 0,
+                action = function() { this.show_accounts() }.bindenv(this)
+            },
+            {
+                id = "budget",
+                title = "Current Period Budget",
+                detail = "Income and expense envelopes allocated for this period",
+                done = this.document.budgets.len() > 0,
+                action = function() { this.show_budget() }.bindenv(this)
+            },
+            {
+                id = "transactions",
+                title = "Transactions",
+                detail = "Actual activity tied to accounts and envelopes",
+                done = this.document.transactions.len() > 0,
+                action = function() { this.show_transactions() }.bindenv(this)
+            },
+            {
+                id = "import",
+                title = "Import Rules",
+                detail = "Description patterns that can suggest envelopes",
+                done = this.document.import_rules.len() > 0,
+                action = function() { this.show_import_options() }.bindenv(this)
+            }
+        ]
+    }
+
+    function setup_complete_count() {
+        local count = 0
+        foreach (step in this.setup_steps())
+            if (step.done) count = count + 1
+        return count
+    }
+
+    function first_incomplete_setup_step() {
+        foreach (step in this.setup_steps())
+            if (!step.done) return step
+        return null
+    }
+
+    function tutorial_steps() {
+        return [
+            {
+                id = "options",
+                title = "Set The Budget Frame",
+                text = "Set the currency, start date, and period length before planning the current period.",
+                action = function() { this.show_options() }.bindenv(this)
+            },
+            {
+                id = "envelopes",
+                title = "Create Envelopes",
+                text = "Envelopes are the jobs you give your money. Keep the first catalog small and adjust it later.",
+                action = function() { this.show_envelopes() }.bindenv(this)
+            },
+            {
+                id = "accounts",
+                title = "Add Accounts",
+                text = "Accounts are where money lives. Transactions change account balances over time.",
+                action = function() { this.show_accounts() }.bindenv(this)
+            },
+            {
+                id = "budget",
+                title = "Plan The Period",
+                text = "The Budget page turns envelope categories into this period's income and expense plan.",
+                action = function() { this.show_budget() }.bindenv(this)
+            },
+            {
+                id = "transactions",
+                title = "Record Activity",
+                text = "Each transaction needs an account for where it happened and an envelope for what it was for.",
+                action = function() { this.show_transactions() }.bindenv(this)
+            },
+            {
+                id = "import",
+                title = "Import Faster",
+                text = "CSV/QIF import can use match rules to suggest envelopes from transaction descriptions.",
+                action = function() { this.show_import_options() }.bindenv(this)
+            },
+            {
+                id = "report",
+                title = "Review Progress",
+                text = "Reports compare your period plan with actual transactions so you can adjust calmly.",
+                action = function() { this.show_budget_report() }.bindenv(this)
+            }
+        ]
+    }
+
+    function ensure_tutorial_state() {
+        if (this.tutorial_state == null) {
+            this.tutorial_state = {
+                completed = false,
+                dismissed = false,
+                last_step = 0
+            }
+        }
+    }
+
+    function persist_tutorial_state(status = null) {
+        this.ensure_tutorial_state()
+        this.repository.save_tutorial_state(this.tutorial_state)
+        if (status != null) this.set_status(status)
+    }
+
+    function mark_tutorial_progress(index) {
+        this.ensure_tutorial_state()
+        this.tutorial_state.last_step = index
+        this.persist_tutorial_state()
+    }
+
+    function mark_tutorial_completed() {
+        this.ensure_tutorial_state()
+        this.tutorial_state.completed = true
+        this.tutorial_state.dismissed = false
+        this.tutorial_state.last_step = this.tutorial_steps().len()
+        this.persist_tutorial_state("Guide complete. You can restart it from the header.")
+    }
+
+    function mark_tutorial_dismissed() {
+        this.ensure_tutorial_state()
+        this.tutorial_state.dismissed = true
+        this.tutorial_state.last_step = this.tutorial_step_index
+        this.persist_tutorial_state("Guide skipped. You can restart it from the header.")
+    }
+
+    function should_offer_tutorial() {
+        this.ensure_tutorial_state()
+        if (this.tutorial_state.completed || this.tutorial_state.dismissed) return false
+        if (this.tutorial_state.last_step > 0) return false
+        return this.first_incomplete_setup_step() != null
+    }
+
+    function maybe_offer_tutorial() {
+        if (!this.should_offer_tutorial()) return
+        if (this.tutorial_button == null) return
+
+        this.close_tutorial_popover()
+        local pop = Gtk.Popover.new()
+        pop.set_parent(this.tutorial_button)
+        pop.set_has_arrow(true)
+        pop.set_position(Gtk.PositionType.bottom)
+
+        local root = this.ui.padded_box(Gtk.Orientation.vertical, 10, 12)
+        root.set_size_request(340, -1)
+        root.append(this.ui.label("Guided Setup", "title-3"))
+        local copy = this.ui.label("Dough can walk you through options, envelopes, accounts, budgets, transactions, and import rules.", "dim-label")
+        copy.set_wrap(true)
+        root.append(copy)
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        actions.append(this.ui.plain_button("Later", function() {
+            this.close_tutorial_popover()
+            this.mark_tutorial_dismissed()
+        }.bindenv(this)))
+        actions.append(this.ui.plain_button("Start", function() {
+            this.close_tutorial_popover()
+            this.start_tutorial()
+        }.bindenv(this)))
+        root.append(actions)
+
+        pop.set_child(root)
+        this.tutorial_popover = pop
+        pop.popup()
+    }
+
+    function close_tutorial_popover() {
+        if (this.tutorial_popover != null) {
+            this.tutorial_popover.popdown()
+            this.tutorial_popover.unparent()
+            this.tutorial_popover = null
+        }
+    }
+
+    function start_tutorial(from_gap = false) {
+        local start = 0
+        if (from_gap) {
+            local incomplete = this.first_incomplete_setup_step()
+            local steps = this.tutorial_steps()
+            if (incomplete != null) {
+                for (local i = 0; i < steps.len(); i = i + 1) {
+                    if (steps[i].id == incomplete.id) {
+                        start = i
+                        break
+                    }
+                }
+            }
+        }
+        this.show_tutorial_step(start)
+    }
+
+    function show_tutorial_step(index) {
+        local steps = this.tutorial_steps()
+        if (index < 0) index = 0
+        if (index >= steps.len()) {
+            this.close_tutorial_popover()
+            this.show_dashboard()
+            this.mark_tutorial_completed()
+            return
+        }
+
+        this.close_tutorial_popover()
+        this.tutorial_step_index = index
+        this.mark_tutorial_progress(index)
+
+        local step = steps[index]
+        step.action()
+
+        local anchor = this.tutorial_button
+        if (step.id in this.nav_buttons) anchor = this.nav_buttons[step.id]
+        if (anchor == null) return
+
+        local pop = Gtk.Popover.new()
+        pop.set_parent(anchor)
+        pop.set_has_arrow(true)
+        pop.set_position(Gtk.PositionType.bottom)
+
+        local root = this.ui.padded_box(Gtk.Orientation.vertical, 10, 12)
+        root.set_size_request(320, -1)
+        root.append(this.ui.label(step.title, "title-3"))
+        local copy = this.ui.label(step.text, "dim-label")
+        copy.set_wrap(true)
+        root.append(copy)
+
+        local counter = this.ui.label((index + 1) + "/" + steps.len(), "dim-label")
+        root.append(counter)
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        local back = this.ui.plain_button("Back", function() {
+            this.show_tutorial_step(this.tutorial_step_index - 1)
+        }.bindenv(this))
+        back.set_sensitive(index > 0)
+        actions.append(back)
+        actions.append(this.ui.plain_button("Skip", function() {
+            this.close_tutorial_popover()
+            this.mark_tutorial_dismissed()
+        }.bindenv(this)))
+        actions.append(this.ui.plain_button(index == steps.len() - 1 ? "Done" : "Next", function() {
+            this.show_tutorial_step(this.tutorial_step_index + 1)
+        }.bindenv(this)))
+        root.append(actions)
+
+        pop.set_child(root)
+        this.tutorial_popover = pop
+        pop.popup()
     }
 
     function refresh_title() {
@@ -205,11 +718,24 @@ class DoughApplication {
         }
 
         if (paths.len() == 0) {
-            local path = this.ensure_envelope_path(type)
-            paths.push(path.folder_id + "/" + path.envelope_id)
-            labels.push(path.name)
+            paths.push("")
+            labels.push(type == "income" ? "No income envelopes" : "No expense envelopes")
         }
 
+        return { paths = paths, labels = labels }
+    }
+
+    function budget_envelope_options(type, budget) {
+        local opts = this.envelope_options(type)
+        local path = this.envelope_path(budget.folder_id, budget.envelope_id)
+        if (path.len() == 0) return opts
+        if (this.document.find_envelope(type, budget.folder_id, budget.envelope_id) != null)
+            return opts
+
+        local paths = [path]
+        local labels = ["Missing: " + path]
+        foreach (item in opts.paths) paths.push(item)
+        foreach (item in opts.labels) labels.push(item)
         return { paths = paths, labels = labels }
     }
 
@@ -235,6 +761,37 @@ class DoughApplication {
         if (txn.folder_id.len() > 0 || txn.envelope_id.len() > 0)
             return "Missing envelope (" + txn.folder_id + "/" + txn.envelope_id + ")"
         return "Unassigned"
+    }
+
+    function import_rule_target_label(rule) {
+        if (rule == null) return ""
+        local folder = this.document.folder_label(rule.type, rule.folder_id)
+        local envelope = this.document.envelope_label(rule.type, rule.folder_id, rule.envelope_id, "")
+        if (folder.len() > 0 && envelope.len() > 0) return folder + " / " + envelope
+        if (rule.folder_id.len() > 0 || rule.envelope_id.len() > 0)
+            return rule.folder_id + "/" + rule.envelope_id
+        return "No target"
+    }
+
+    function transaction_review_status(txn) {
+        if (txn.type == "transfer")
+            return { text = "Transfer - no envelope needed", css = "dim-label" }
+
+        local envelope = this.document.find_envelope(txn.type, txn.folder_id, txn.envelope_id)
+        if (envelope == null)
+            return { text = "Needs envelope", css = "dough-danger" }
+
+        if (txn.splits.len() > 0)
+            return { text = "Split across " + txn.splits.len() + " envelopes", css = "dough-warning" }
+
+        local rule = this.match_import_rule(txn.description, txn.type)
+        if (rule != null) {
+            if (rule.type == txn.type && rule.folder_id == txn.folder_id && rule.envelope_id == txn.envelope_id)
+                return { text = "Rule match: " + rule.name, css = "dough-good" }
+            return { text = "Rule suggests: " + this.import_rule_target_label(rule), css = "dough-warning" }
+        }
+
+        return { text = "Manual assignment", css = "dim-label" }
     }
 
     function transaction_amount_label(txn) {
@@ -366,25 +923,6 @@ class DoughApplication {
         return repaired
     }
 
-    function ensure_folder_for_type(type) {
-        local folders = this.document.folders_for_type(type)
-        if (folders.len() > 0) return folders[0]
-
-        local folder = Models.EnvelopeFolder(this.make_id(type + "-folder"),
-            type == "income" ? "Income" : "Expenses", type)
-        if (type == "income") this.document.add_income_folder(folder)
-        else this.document.add_expense_folder(folder)
-        return folder
-    }
-
-    function create_envelope_and_budget(type) {
-        local folder = this.ensure_folder_for_type(type)
-        local envelope = Models.Envelope(this.make_id("env"), "New Envelope", "")
-        folder.add_envelope(envelope)
-
-        return this.create_budget_for_envelope(type, folder, envelope)
-    }
-
     function create_budget_for_envelope(type, folder, envelope) {
         local budget = Models.BudgetEnvelope(
             this.make_id("budget"),
@@ -418,11 +956,7 @@ class DoughApplication {
     }
 
     function clear_listbox(list) {
-        local child = list.get_first_child()
-        while (child != null) {
-            list.remove(child)
-            child = list.get_first_child()
-        }
+        this.clear_children(list)
     }
 
     function remove_array_item_by_id(items, id) {
@@ -588,26 +1122,94 @@ class DoughApplication {
         if (area != null) area.queue_draw()
     }
 
+    function add_setup_step_row(list, step) {
+        local row = Gtk.ListBoxRow.new()
+        local box = Gtk.Box.new(Gtk.Orientation.vertical, 5)
+        box.set_margin_top(7)
+        box.set_margin_bottom(7)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+
+        local line = Gtk.Box.new(Gtk.Orientation.horizontal, 7)
+        local status = Gtk.Label.new(step.done ? "[x]" : "[ ]")
+        status.set_xalign(0.0)
+        status.add_css_class(step.done ? "dough-good" : "dough-warning")
+        line.append(status)
+
+        local title = this.ui.label(step.title)
+        title.set_hexpand(true)
+        line.append(title)
+        box.append(line)
+
+        local detail = this.ui.label(step.detail, "dim-label")
+        detail.set_wrap(true)
+        box.append(detail)
+
+        local action = this.ui.plain_button(step.done ? "Review" : "Open", function() {
+            step.action()
+        }.bindenv(this))
+        action.set_halign(Gtk.Align.end)
+        box.append(action)
+
+        row.set_child(box)
+        list.append(row)
+    }
+
+    function build_setup_checklist() {
+        local steps = this.setup_steps()
+        local missing = []
+        foreach (step in steps)
+            if (!step.done) missing.push(step)
+
+        local root = Gtk.Box.new(Gtk.Orientation.vertical, 8)
+        root.add_css_class("dough-setup-panel")
+        root.set_size_request(280, -1)
+
+        local header = Gtk.Box.new(Gtk.Orientation.vertical, 2)
+        local title = this.ui.label("Setup", "title-3")
+        header.append(title)
+        header.append(this.ui.label(this.setup_complete_count() + "/" + steps.len() + " ready", "dim-label"))
+        root.append(header)
+
+        if (missing.len() == 0) {
+            local ready = this.ui.label("All essentials are ready.", "dough-good")
+            ready.set_wrap(true)
+            root.append(ready)
+        } else {
+            local next = missing[0]
+            local next_label = this.ui.label("Next: " + next.title, "dough-warning")
+            next_label.set_wrap(true)
+            root.append(next_label)
+
+            local list = Gtk.ListBox.new()
+            list.set_selection_mode(Gtk.SelectionMode.none)
+            local visible = missing.len() > 3 ? 3 : missing.len()
+            for (local i = 0; i < visible; i = i + 1)
+                this.add_setup_step_row(list, missing[i])
+            root.append(list)
+
+            if (missing.len() > visible)
+                root.append(this.ui.label((missing.len() - visible) + " more setup items", "dim-label"))
+        }
+
+        local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        if (missing.len() > 0) {
+            actions.append(this.ui.plain_button("Open Next", function() {
+                local step = this.first_incomplete_setup_step()
+                if (step != null) step.action()
+            }.bindenv(this)))
+        }
+        local resume_label = "Start Guide"
+        if (missing.len() > 0) resume_label = "Resume Guide"
+        else if (this.tutorial_state != null && this.tutorial_state.completed) resume_label = "Review Guide"
+        actions.append(this.ui.plain_button(resume_label, function() { this.start_tutorial(true) }.bindenv(this)))
+        root.append(actions)
+
+        return root
+    }
+
     function build_dashboard() {
         local root = Gtk.Box.new(Gtk.Orientation.vertical, 0)
-        local toolbar = Gtk.Box.new(Gtk.Orientation.horizontal, 6)
-        toolbar.set_margin_top(8)
-        toolbar.set_margin_bottom(8)
-        toolbar.set_margin_start(8)
-        toolbar.set_margin_end(8)
-
-        toolbar.append(this.ui.action_button("New", "icon.png", function() { this.new_document() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Sample", "report.png", function() { this.load_sample_document() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Accounts", "books.png", function() { this.show_accounts() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Transactions", "report.png", function() { this.show_transactions() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Import", "report.png", function() { this.show_import_options() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Budget", "budget.png", function() { this.show_budget() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Report", "report.png", function() { this.show_budget_report() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Envelopes", "envelope.png", function() { this.show_envelopes() }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Line", "linegraph.png", function() { this.show_graph("Line Graphs", "linegraph.png") }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Pie", "piechart.png", function() { this.show_graph("Pie Charts", "piechart.png") }.bindenv(this)))
-        toolbar.append(this.ui.action_button("Options", "interface.png", function() { this.show_options() }.bindenv(this)))
-        root.append(toolbar)
 
         local head = this.ui.padded_box(Gtk.Orientation.vertical, 8, 14)
         this.title_label = this.ui.label(this.document.title, "title-1")
@@ -622,7 +1224,15 @@ class DoughApplication {
         head.append(nav)
         root.append(head)
 
+        local body = Gtk.Box.new(Gtk.Orientation.horizontal, 14)
+        body.set_margin_start(14)
+        body.set_margin_end(14)
+        body.set_margin_bottom(14)
+        body.set_hexpand(true)
+        body.set_vexpand(true)
+
         local scroll = Gtk.ScrolledWindow.new()
+        scroll.set_hexpand(true)
         scroll.set_vexpand(true)
         this.dashboard_area = Gtk.DrawingArea.new()
         this.dashboard_area.set_size_request(720, 360)
@@ -630,8 +1240,15 @@ class DoughApplication {
             this.draw_dashboard(cr, width, height)
         }.bindenv(this), null, function(_) {})
         scroll.set_child(this.dashboard_area)
-        root.append(scroll)
+        body.append(scroll)
+        body.append(this.build_setup_checklist())
+
+        root.append(body)
         return root
+    }
+
+    function show_dashboard() {
+        this.show_page("Dashboard", this.build_dashboard())
     }
 
     function draw_dashboard(cr, width, height) {
@@ -688,19 +1305,7 @@ class DoughApplication {
     }
 
     function show_window(title, child, width = 820, height = 560) {
-        local win = Gtk.ApplicationWindow.new(this.app)
-        win.set_title(title)
-        win.set_default_size(width, height)
-
-        local header = Gtk.HeaderBar.new()
-        header.set_title_widget(Gtk.Label.new(title))
-        header.pack_end(this.ui.plain_button("Close", function() { win.close() }))
-        win.set_titlebar(header)
-
-        win.set_child(child)
-        win.set_transient_for(this.window)
-        win.present()
-        return win
+        return this.show_page(title, child)
     }
 
     function module_window(title, details, icon_name) {
@@ -902,13 +1507,19 @@ class DoughApplication {
         box.append(description_entry)
 
         box.append(this.ui.plain_button("Delete", function() {
-            this.remove_array_item_by_id(this.document.accounts, account.id)
-            for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
-                if (this.document.transactions[i].affects_account(account.id))
-                    this.document.transactions.remove(i)
-            }
-            list.remove(row)
-            this.persist_document("Deleted account and related transactions.")
+            this.confirm_action(
+                "Delete Account",
+                "Delete " + this.account_label(account) + " and every transaction that uses it?",
+                function() {
+                    this.remove_array_item_by_id(this.document.accounts, account.id)
+                    for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
+                        if (this.document.transactions[i].affects_account(account.id))
+                            this.document.transactions.remove(i)
+                    }
+                    list.remove(row)
+                    this.persist_document("Deleted account and related transactions.")
+                }.bindenv(this),
+                "Delete Account")
         }.bindenv(this)))
 
         row.set_child(box)
@@ -1009,6 +1620,10 @@ class DoughApplication {
             "dim-label")
         meta.set_wrap(true)
         details.append(meta)
+        local review = this.transaction_review_status(txn)
+        local review_label = this.ui.label(review.text, review.css)
+        review_label.set_wrap(true)
+        details.append(review_label)
         box.append(details)
 
         local amount = Gtk.Label.new(this.transaction_amount_label(txn))
@@ -1026,10 +1641,16 @@ class DoughApplication {
         }.bindenv(this)))
 
         actions.append(this.ui.plain_button("Delete", function() {
-            this.remove_array_item_by_id(this.document.transactions, txn.id)
-            list.remove(row)
-            this.persist_document("Deleted transaction.")
-            if (refresh != null) refresh()
+            this.confirm_action(
+                "Delete Transaction",
+                "Delete " + (txn.description.len() > 0 ? txn.description : "this transaction") + "?",
+                function() {
+                    this.remove_array_item_by_id(this.document.transactions, txn.id)
+                    list.remove(row)
+                    this.persist_document("Deleted transaction.")
+                    if (refresh != null) refresh()
+                }.bindenv(this),
+                "Delete Transaction")
         }.bindenv(this)))
         box.append(actions)
 
@@ -1109,7 +1730,7 @@ class DoughApplication {
             this.set_status("Matched " + description_entry.get_text() + " to " + path.name + ".")
         }.bindenv(this)))
 
-        local win = null
+        local dialog = null
         actions.append(this.ui.plain_button("Save", function() {
             local amount = this.parse_amount(amount_entry.get_text())
             if (amount == null) {
@@ -1148,11 +1769,11 @@ class DoughApplication {
             if (add_on_save) this.document.add_transaction(txn)
             this.persist_document(add_on_save ? "Added transaction." : "Updated transaction.")
             if (refresh != null) refresh()
-            if (win != null) win.close()
+            if (dialog != null) dialog.close()
         }.bindenv(this)))
         root.append(actions)
 
-        win = this.show_window(add_on_save ? "Add Transaction" : "Edit Transaction", root, 680, 480)
+        dialog = this.show_overlay(add_on_save ? "Add Transaction" : "Edit Transaction", root, 680, 480)
     }
 
     function show_transaction_splits(txn) {
@@ -1199,7 +1820,7 @@ class DoughApplication {
         root.append(actions)
 
         refresh()
-        this.show_window("Transaction Splits", root, 760, 420)
+        this.show_overlay("Transaction Splits", root, 760, 420)
     }
 
     function add_split_editor_row(list, txn, split, refresh = null) {
@@ -1553,10 +2174,16 @@ class DoughApplication {
             this.persist_document("Added import match rule.")
         }.bindenv(this)))
         rule_actions.append(this.ui.plain_button("Reset Defaults", function() {
-            this.document.import_rules = []
-            Models.ensure_default_import_rules(this.document)
-            this.populate_import_rule_rows(rules_data.list)
-            this.persist_document("Restored default import match rules.")
+            this.confirm_action(
+                "Reset Match Rules",
+                "Replace all current import match rules with the default rules?",
+                function() {
+                    this.document.import_rules = []
+                    Models.ensure_default_import_rules(this.document)
+                    this.populate_import_rule_rows(rules_data.list)
+                    this.persist_document("Restored default import match rules.")
+                }.bindenv(this),
+                "Reset Rules")
         }.bindenv(this)))
         root.append(rule_actions)
 
@@ -1652,9 +2279,15 @@ class DoughApplication {
         }.bindenv(this)))
 
         box.append(this.ui.plain_button("Delete", function() {
-            this.remove_array_item_by_id(this.document.import_rules, rule.id)
-            list.remove(row)
-            this.persist_document("Deleted import match rule.")
+            this.confirm_action(
+                "Delete Match Rule",
+                "Delete the import match rule " + rule.name + "?",
+                function() {
+                    this.remove_array_item_by_id(this.document.import_rules, rule.id)
+                    list.remove(row)
+                    this.persist_document("Deleted import match rule.")
+                }.bindenv(this),
+                "Delete Rule")
         }.bindenv(this)))
 
         row.set_child(box)
@@ -1691,37 +2324,44 @@ class DoughApplication {
             this.refresh_budget_summary(summary_labels, balance_area)
         }.bindenv(this)
 
-        local list_data = this.ui.scrolled_list()
-        foreach (item in this.document.budgets)
-            this.add_budget_editor_row(list_data.list, item, refresh_budget)
-        root.append(list_data.scroll)
+        local income_data = this.ui.scrolled_list()
+        local expense_data = this.ui.scrolled_list()
+        local income_count = 0
+        local expense_count = 0
+        foreach (item in this.document.budgets) {
+            if (item.type == "income") {
+                income_count = income_count + 1
+                this.add_budget_editor_row(income_data.list, item, refresh_budget)
+            } else {
+                expense_count = expense_count + 1
+                this.add_budget_editor_row(expense_data.list, item, refresh_budget)
+            }
+        }
+        if (income_count == 0) this.add_empty_list_row(income_data.list, "No income planned for this period.")
+        if (expense_count == 0) this.add_empty_list_row(expense_data.list, "No expenses planned for this period.")
+
+        root.append(this.ui.label("Income Plan", "title-3"))
+        root.append(income_data.scroll)
+        root.append(this.ui.label("Expense Plan", "title-3"))
+        root.append(expense_data.scroll)
 
         local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         actions.append(this.ui.plain_button("Add Expense", function() {
-            local envelope = this.create_envelope_and_budget("expense")
-            local name_entry = this.add_budget_editor_row(list_data.list, envelope, refresh_budget)
-            name_entry.grab_focus()
-            this.persist_document("Added expense budget and stored it in Spinodb.")
-            refresh_budget()
+            this.show_budget_envelope_chooser("expense", null, refresh_budget)
         }.bindenv(this)))
         actions.append(this.ui.plain_button("Add Income", function() {
-            local envelope = this.create_envelope_and_budget("income")
-            local name_entry = this.add_budget_editor_row(list_data.list, envelope, refresh_budget)
-            name_entry.grab_focus()
-            this.persist_document("Added income budget and stored it in Spinodb.")
-            refresh_budget()
-        }.bindenv(this)))
-        actions.append(this.ui.plain_button("Choose Expense", function() {
-            this.show_budget_envelope_chooser("expense", list_data.list, refresh_budget)
-        }.bindenv(this)))
-        actions.append(this.ui.plain_button("Choose Income", function() {
-            this.show_budget_envelope_chooser("income", list_data.list, refresh_budget)
+            this.show_budget_envelope_chooser("income", null, refresh_budget)
         }.bindenv(this)))
         actions.append(this.ui.plain_button("Clear Budget", function() {
-            this.document.budgets = []
-            this.clear_listbox(list_data.list)
-            this.persist_document("Cleared the current budget.")
-            refresh_budget()
+            this.confirm_action(
+                "Clear Budget",
+                "Remove every budget row for the current view?",
+                function() {
+                    this.document.budgets = []
+                    this.persist_document("Cleared the current budget.")
+                    this.show_budget()
+                }.bindenv(this),
+                "Clear Budget")
         }.bindenv(this)))
         actions.append(this.ui.plain_button("Copy Budget", function() {
             local originals = []
@@ -1737,10 +2377,9 @@ class DoughApplication {
                     item.envelope_id,
                     this.document.current_period())
                 this.document.add_budget(copied)
-                this.add_budget_editor_row(list_data.list, copied, refresh_budget)
             }
             this.persist_document("Copied the budget rows.")
-            refresh_budget()
+            this.show_budget()
         }.bindenv(this)))
         root.append(actions)
 
@@ -1756,37 +2395,23 @@ class DoughApplication {
         box.set_margin_start(10)
         box.set_margin_end(10)
 
-        local name_entry = Gtk.Entry.new()
-        name_entry.set_hexpand(true)
-        name_entry.set_placeholder_text("Envelope name")
-        name_entry.set_text(this.document.budget_name(envelope))
-        name_entry.connect("changed", function() {
-            envelope.name = name_entry.get_text()
-            local linked = this.document.find_envelope(envelope.type, envelope.folder_id, envelope.envelope_id)
-            if (linked != null) linked.name = envelope.name
-            this.persist_document()
-            if (refresh_budget != null) refresh_budget()
-        }.bindenv(this))
-        box.append(name_entry)
-
         if (envelope.type != "income" && envelope.type != "expense")
             envelope.type = "expense"
-        local resolved_path = this.ensure_envelope_path(
-            envelope.type,
-            envelope.folder_id,
-            envelope.envelope_id,
-            envelope.name)
-        envelope.type = resolved_path.type
-        envelope.folder_id = resolved_path.folder_id
-        envelope.envelope_id = resolved_path.envelope_id
-        if (resolved_path.created) this.persist_document()
+
+        local linked_envelope = this.document.find_envelope(envelope.type, envelope.folder_id, envelope.envelope_id)
+        if (linked_envelope != null) envelope.name = linked_envelope.name
+
+        local name_label = this.ui.label(this.document.budget_name(envelope))
+        name_label.set_hexpand(true)
+        if (linked_envelope == null) name_label.add_css_class("dough-danger")
+        box.append(name_label)
 
         local type_values = ["expense", "income"]
         local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Expense", "Income"]), null)
         type_dropdown.set_selected(this.index_for_value(type_values, envelope.type, 0))
         box.append(type_dropdown)
 
-        local envelope_opts = this.envelope_options(envelope.type)
+        local envelope_opts = this.budget_envelope_options(envelope.type, envelope)
         local envelope_dropdown = Gtk.DropDown.new(Gtk.StringList.new(envelope_opts.labels), null)
         envelope_dropdown.set_hexpand(true)
         envelope_dropdown.set_selected(this.index_for_value(
@@ -1813,14 +2438,17 @@ class DoughApplication {
             envelope.folder_id = folder_id
             envelope.envelope_id = envelope_id
             envelope.name = linked.name
-            if (name_entry.get_text() != linked.name) name_entry.set_text(linked.name)
+            name_label.set_text(linked.name)
+            name_label.remove_css_class("dough-danger")
             this.persist_document()
             if (refresh_budget != null) refresh_budget()
         }.bindenv(this)
 
         local refresh_envelope_dropdown = function(preferred_path = null) {
             local selected_type = this.dropdown_value(type_values, type_dropdown, envelope.type)
-            envelope_opts = this.envelope_options(selected_type)
+            envelope_opts = selected_type == envelope.type ?
+                this.budget_envelope_options(selected_type, envelope) :
+                this.envelope_options(selected_type)
             envelope_dropdown.set_model(Gtk.StringList.new(envelope_opts.labels))
             local wanted = preferred_path != null ? preferred_path :
                 this.envelope_path(envelope.folder_id, envelope.envelope_id)
@@ -1852,15 +2480,21 @@ class DoughApplication {
         box.append(spent_label)
 
         box.append(this.ui.plain_button("Remove", function() {
-            this.remove_array_item_by_id(this.document.budgets, envelope.id)
-            list.remove(row)
-            this.persist_document("Removed budget row.")
-            if (refresh_budget != null) refresh_budget()
+            this.confirm_action(
+                "Remove Budget Row",
+                "Remove " + this.document.budget_name(envelope) + " from this budget?",
+                function() {
+                    this.remove_array_item_by_id(this.document.budgets, envelope.id)
+                    list.remove(row)
+                    this.persist_document("Removed budget row.")
+                    if (refresh_budget != null) refresh_budget()
+                }.bindenv(this),
+                "Remove Row")
         }.bindenv(this)))
 
         row.set_child(box)
         list.append(row)
-        return name_entry
+        return name_label
     }
 
     function show_budget_envelope_chooser(type, budget_list, refresh_budget = null) {
@@ -1871,11 +2505,17 @@ class DoughApplication {
 
         local list_data = this.ui.scrolled_list()
         local chooser_win = null
+        local visible_count = 0
 
         foreach (folder in this.document.folders_for_type(type)) {
-            this.ui.add_row(list_data.list, folder.name, folder.hidden ? "hidden" : null)
+            local folder_added = false
             foreach (envelope in folder.envelopes) {
                 if (folder.hidden || envelope.hidden) continue
+                if (!folder_added) {
+                    this.ui.add_row(list_data.list, folder.name, null)
+                    folder_added = true
+                }
+                visible_count = visible_count + 1
                 local chosen_folder = folder
                 local chosen_envelope = envelope
 
@@ -1891,10 +2531,11 @@ class DoughApplication {
                 box.append(name)
                 box.append(this.ui.plain_button("Use", function() {
                     local budget = this.create_budget_for_envelope(type, chosen_folder, chosen_envelope)
-                    this.add_budget_editor_row(budget_list, budget, refresh_budget)
+                    if (budget_list != null) this.add_budget_editor_row(budget_list, budget, refresh_budget)
                     this.persist_document("Added existing envelope to budget.")
                     if (refresh_budget != null) refresh_budget()
                     if (chooser_win != null) chooser_win.close()
+                    if (budget_list == null) this.show_budget()
                 }.bindenv(this)))
 
                 row.set_child(box)
@@ -1902,8 +2543,22 @@ class DoughApplication {
             }
         }
 
+        if (visible_count == 0) {
+            this.add_empty_list_row(
+                list_data.list,
+                type == "income" ?
+                    "No income envelopes yet. Create income envelopes in the envelope catalog first." :
+                    "No expense envelopes yet. Create expense envelopes in the envelope catalog first.")
+            local empty_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+            empty_actions.append(this.ui.plain_button("Open Envelopes", function() {
+                if (chooser_win != null) chooser_win.close()
+                this.show_envelopes()
+            }.bindenv(this)))
+            root.append(empty_actions)
+        }
+
         root.append(list_data.scroll)
-        chooser_win = this.show_window(type == "income" ? "Choose Income Envelope" : "Choose Expense Envelope", root, 680, 440)
+        chooser_win = this.show_overlay(type == "income" ? "Choose Income Envelope" : "Choose Expense Envelope", root, 680, 440)
     }
 
     function draw_balance_indicator(cr, width, height) {
@@ -2055,23 +2710,29 @@ class DoughApplication {
         }.bindenv(this)))
 
         box.append(this.ui.plain_button("Delete Folder", function() {
-            local folders = this.document.folders_for_type(type)
-            this.remove_array_item_by_id(folders, folder.id)
-            for (local i = this.document.budgets.len() - 1; i >= 0; i = i - 1) {
-                if (this.document.budgets[i].folder_id == folder.id)
-                    this.document.budgets.remove(i)
-            }
-            for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
-                if (this.document.transactions[i].folder_id == folder.id)
-                    this.document.transactions.remove(i)
-            }
-            for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
-                if (this.document.import_rules[i].type == type &&
-                    this.document.import_rules[i].folder_id == folder.id)
-                    this.document.import_rules.remove(i)
-            }
-            this.populate_envelope_catalog(list, type)
-            this.persist_document("Deleted folder and related rows.")
+            this.confirm_action(
+                "Delete Folder",
+                "Delete " + folder.name + " and all related budget rows, transactions, and import rules?",
+                function() {
+                    local folders = this.document.folders_for_type(type)
+                    this.remove_array_item_by_id(folders, folder.id)
+                    for (local i = this.document.budgets.len() - 1; i >= 0; i = i - 1) {
+                        if (this.document.budgets[i].folder_id == folder.id)
+                            this.document.budgets.remove(i)
+                    }
+                    for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
+                        if (this.document.transactions[i].folder_id == folder.id)
+                            this.document.transactions.remove(i)
+                    }
+                    for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
+                        if (this.document.import_rules[i].type == type &&
+                            this.document.import_rules[i].folder_id == folder.id)
+                            this.document.import_rules.remove(i)
+                    }
+                    this.populate_envelope_catalog(list, type)
+                    this.persist_document("Deleted folder and related rows.")
+                }.bindenv(this),
+                "Delete Folder")
         }.bindenv(this)))
 
         row.set_child(box)
@@ -2122,24 +2783,30 @@ class DoughApplication {
         box.append(hidden)
 
         box.append(this.ui.plain_button("Delete", function() {
-            this.remove_array_item_by_id(folder.envelopes, envelope.id)
-            for (local i = this.document.budgets.len() - 1; i >= 0; i = i - 1) {
-                local budget = this.document.budgets[i]
-                if (budget.type == type && budget.folder_id == folder.id && budget.envelope_id == envelope.id)
-                    this.document.budgets.remove(i)
-            }
-            for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
-                local txn = this.document.transactions[i]
-                if (txn.type == type && txn.folder_id == folder.id && txn.envelope_id == envelope.id)
-                    this.document.transactions.remove(i)
-            }
-            for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
-                local rule = this.document.import_rules[i]
-                if (rule.type == type && rule.folder_id == folder.id && rule.envelope_id == envelope.id)
-                    this.document.import_rules.remove(i)
-            }
-            list.remove(row)
-            this.persist_document("Deleted envelope and related rows.")
+            this.confirm_action(
+                "Delete Envelope",
+                "Delete " + envelope.name + " and all related budget rows, transactions, and import rules?",
+                function() {
+                    this.remove_array_item_by_id(folder.envelopes, envelope.id)
+                    for (local i = this.document.budgets.len() - 1; i >= 0; i = i - 1) {
+                        local budget = this.document.budgets[i]
+                        if (budget.type == type && budget.folder_id == folder.id && budget.envelope_id == envelope.id)
+                            this.document.budgets.remove(i)
+                    }
+                    for (local i = this.document.transactions.len() - 1; i >= 0; i = i - 1) {
+                        local txn = this.document.transactions[i]
+                        if (txn.type == type && txn.folder_id == folder.id && txn.envelope_id == envelope.id)
+                            this.document.transactions.remove(i)
+                    }
+                    for (local i = this.document.import_rules.len() - 1; i >= 0; i = i - 1) {
+                        local rule = this.document.import_rules[i]
+                        if (rule.type == type && rule.folder_id == folder.id && rule.envelope_id == envelope.id)
+                            this.document.import_rules.remove(i)
+                    }
+                    list.remove(row)
+                    this.persist_document("Deleted envelope and related rows.")
+                }.bindenv(this),
+                "Delete Envelope")
         }.bindenv(this)))
 
         row.set_child(box)
@@ -2277,8 +2944,9 @@ class DoughApplication {
         date_format_entry.set_text(this.document.date_format)
         local start_date_entry = Gtk.Entry.new()
         start_date_entry.set_text(this.document.start_date)
-        local period_length_entry = Gtk.Entry.new()
-        period_length_entry.set_text(this.document.period_length)
+        local period_values = ["weekly", "fortnightly", "monthly"]
+        local period_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Weekly", "Fortnightly", "Monthly"]), null)
+        period_dropdown.set_selected(this.index_for_value(period_values, this.document.period_length, 2))
 
         root.append(this.ui.label("Budget Title"))
         root.append(title_entry)
@@ -2292,7 +2960,7 @@ class DoughApplication {
         root.append(this.ui.label("Start Date"))
         root.append(start_date_entry)
         root.append(this.ui.label("Period Length"))
-        root.append(period_length_entry)
+        root.append(period_dropdown)
         root.append(this.ui.plain_button("Apply", function() {
             this.document.title = title_entry.get_text()
             this.document.currency = currency_entry.get_text()
@@ -2301,7 +2969,7 @@ class DoughApplication {
             if (reserve != null) this.document.reserve_amount = reserve
             this.document.date_format = date_format_entry.get_text()
             this.document.start_date = start_date_entry.get_text()
-            this.document.period_length = period_length_entry.get_text()
+            this.document.period_length = this.dropdown_value(period_values, period_dropdown, "monthly")
             this.document.regenerate_periods()
             this.persist_document("Options applied and stored in Spinodb.")
         }.bindenv(this)))
@@ -2310,13 +2978,31 @@ class DoughApplication {
     }
 
     function show_about() {
-        local root = this.ui.padded_box(Gtk.Orientation.vertical, 12, 22)
-        root.append(this.ui.picture("logo.png", 320, 180))
-        root.append(this.ui.label("Dough", "title-1"))
-        local copy = this.ui.label("A free personal finance and budgeting application, ported to GTK4 with SQGI and Spinodb persistence.", "dim-label")
-        copy.set_wrap(true)
-        root.append(copy)
-        this.show_window("About Dough", root, 460, 420)
+        local dialog = Gtk.AboutDialog.new()
+        dialog.set_title("About Dough")
+        dialog.set_program_name("Dough")
+        dialog.set_version(this.version)
+        dialog.set_comments("A free personal finance and budgeting application.")
+        dialog.set_copyright("Copyright (c) 2026 Camel Software")
+        dialog.set_website("https://github.com/supercamel/Dough")
+        dialog.set_website_label("github.com/supercamel/Dough")
+        dialog.set_license_type(Gtk.License.gpl_3_0)
+        dialog.set_modal(true)
+
+        if (this.window != null) dialog.set_transient_for(this.window)
+
+        local icon_path = this.assets.path("icon.png")
+        if (icon_path != null) {
+            try {
+                dialog.set_logo(Gdk.Texture.new_from_filename(icon_path))
+            } catch (e) {
+                dialog.set_logo_icon_name("icon")
+            }
+        } else {
+            dialog.set_logo_icon_name("icon")
+        }
+
+        dialog.present()
     }
 
     function previous_period() {
@@ -2328,18 +3014,6 @@ class DoughApplication {
         if (this.document.period_index < this.document.periods.len() - 1)
             this.document.period_index = this.document.period_index + 1
         this.persist_document("Showing " + this.document.current_period())
-    }
-
-    function new_document() {
-        this.document = Models.DoughDocument()
-        this.document.title = "New Budget"
-        this.document.regenerate_periods()
-        this.persist_document("Created a new Dough document in Spinodb.")
-    }
-
-    function load_sample_document() {
-        this.document = Models.sample_document()
-        this.persist_document("Loaded sample Dough data.")
     }
 
     function quit() {

@@ -4,6 +4,19 @@ local Spino = import("Spino", "1.2")
 
 local Models = import("models.nut")
 
+function table_get(t, key, fallback = null) {
+    if (t != null && key in t) return t[key]
+    return fallback
+}
+
+function tutorial_state_from_table(t) {
+    return {
+        completed = table_get(t, "completed", false),
+        dismissed = table_get(t, "dismissed", false),
+        last_step = table_get(t, "last_step", 0)
+    }
+}
+
 class SpinodbRepository {
     db_path = ""
     journal_path = ""
@@ -54,6 +67,21 @@ class SpinodbRepository {
         local data = doc.to_table()
         data.kind <- "current"
         this.state.upsert("{kind:\"current\"}", sqgi.json.stringify(data))
+        this.db.save(this.db_path)
+    }
+
+    function load_tutorial_state() {
+        local row = this.state.find_one("{kind:\"tutorial\"}")
+        if (row != null && row.len() > 0)
+            return tutorial_state_from_table(sqgi.json.parse(row))
+
+        return tutorial_state_from_table(null)
+    }
+
+    function save_tutorial_state(tutorial_state) {
+        local data = tutorial_state_from_table(tutorial_state)
+        data.kind <- "tutorial"
+        this.state.upsert("{kind:\"tutorial\"}", sqgi.json.stringify(data))
         this.db.save(this.db_path)
     }
 
