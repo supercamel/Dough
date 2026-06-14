@@ -149,6 +149,7 @@
       "installer_name": "Dough-Setup.exe",
       "install_dir": "$LOCALAPPDATA\\Programs\\Dough",
       "request_execution_level": "user",
+      "icon": "assets/icon.ico",
       "desktop_shortcut": true,
       "start_menu_shortcut": true,
       "start_menu_folder": "Dough",

@@ -9,6 +9,9 @@ local Models = import("models.nut")
 local Repository = import("repository.nut")
 local Helpers = import("ui_helpers.nut")
 
+const DOUGH_APP_ID = "dev.sam.dough"
+const DOUGH_ICON_NAME = "dev.sam.dough"
+
 class DoughApplication {
     app = null
     repository = null
@@ -44,7 +47,7 @@ class DoughApplication {
         this.tutorial_state = this.repository.load_tutorial_state()
         this.repair_transaction_envelope_paths()
         this.nav_buttons = {}
-        this.app = Gtk.Application.new("dev.sam.dough", Gio.ApplicationFlags.flags_none)
+        this.app = Gtk.Application.new(DOUGH_APP_ID, Gio.ApplicationFlags.flags_none)
     }
 
     function run(argc, argv) {
@@ -67,6 +70,7 @@ class DoughApplication {
         this.window = Gtk.ApplicationWindow.new(this.app)
         this.window.set_default_size(1100, 760)
         this.window.set_title("Dough")
+        this.apply_window_icon(this.window)
 
         local header = Gtk.HeaderBar.new()
         this.page_title_label = Gtk.Label.new("Dashboard")
@@ -114,7 +118,8 @@ class DoughApplication {
     }
 
     function configure_app_icon() {
-        local icon_path = this.assets.path("icon.png")
+        local icon_path = this.assets.path(DOUGH_ICON_NAME + ".png")
+        if (icon_path == null) icon_path = this.assets.path("icon.png")
         if (icon_path == null) return
 
         local display = Gdk.Display.get_default()
@@ -123,10 +128,17 @@ class DoughApplication {
             theme.add_search_path(GLib.path_get_dirname(icon_path))
         }
 
-        local basename = GLib.path_get_basename(icon_path)
-        local dot = basename.find(".")
-        local icon_name = dot == null ? basename : basename.slice(0, dot)
-        Gtk.Window.set_default_icon_name(icon_name)
+        Gtk.Window.set_default_icon_name(DOUGH_ICON_NAME)
+    }
+
+    function apply_window_icon(window) {
+        if (window == null) return
+
+        try {
+            window.set_icon_name(DOUGH_ICON_NAME)
+        } catch (e) {
+            Gtk.Window.set_default_icon_name(DOUGH_ICON_NAME)
+        }
     }
 
     function install_css() {
