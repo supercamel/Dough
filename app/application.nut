@@ -134,7 +134,7 @@ class DoughApplication {
         if (display == null) return
 
         local provider = Gtk.CssProvider.new()
-        provider.load_from_string(
+        local css =
             ".dough-shell { background: @theme_bg_color; }" +
             ".dough-nav { padding: 8px; border-bottom: 1px solid @borders; background: @theme_base_color; }" +
             ".dough-nav button { margin-right: 3px; }" +
@@ -148,7 +148,12 @@ class DoughApplication {
             ".dough-status { padding: 6px 10px; border-top: 1px solid @borders; background: @theme_base_color; }" +
             ".dough-overlay-scrim { background: rgba(0, 0, 0, 0.42); }" +
             ".dough-dialog-card { background: @theme_bg_color; border: 1px solid @borders; border-radius: 8px; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.30); }" +
-            ".dough-dialog-header { padding: 10px 12px; border-bottom: 1px solid @borders; }")
+            ".dough-dialog-header { padding: 10px 12px; border-bottom: 1px solid @borders; }"
+        try {
+            provider.load_from_string(css)
+        } catch (_) {
+            provider.load_from_data(css, css.len())
+        }
         Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     }
 
