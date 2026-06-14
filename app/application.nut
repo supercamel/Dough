@@ -32,7 +32,7 @@ class DoughApplication {
     tutorial_step_index = 0
     tutorial_state = null
     smoke_test = false
-    version = "0.1.7"
+    version = "0.1.8"
 
     constructor(options = null) {
         this.smoke_test = options != null && "smoke" in options ? options.smoke : false
@@ -72,10 +72,13 @@ class DoughApplication {
         this.page_title_label = Gtk.Label.new("Dashboard")
         this.page_title_label.add_css_class("title-3")
         header.set_title_widget(this.page_title_label)
-        this.tutorial_button = this.ui.plain_button("Guide", function() { this.start_tutorial() }.bindenv(this))
+        this.tutorial_button = this.ui.plain_button("Guide", function() { this.start_tutorial() }.bindenv(this),
+            "Open the guided setup walkthrough.")
         header.pack_start(this.tutorial_button)
-        header.pack_end(this.ui.plain_button("About", function() { this.show_about() }.bindenv(this)))
-        header.pack_end(this.ui.plain_button("Quit", function() { this.quit() }.bindenv(this)))
+        header.pack_end(this.ui.plain_button("About", function() { this.show_about() }.bindenv(this),
+            "Show Dough version and project information."))
+        header.pack_end(this.ui.plain_button("Quit", function() { this.quit() }.bindenv(this),
+            "Quit Dough."))
         this.window.set_titlebar(header)
 
         this.app_overlay = Gtk.Overlay.new()
@@ -170,8 +173,70 @@ class DoughApplication {
         return shell
     }
 
+    function tooltip_text_for_control(widget) {
+        local css_name = ""
+        try {
+            css_name = widget.get_css_name()
+        } catch (e) {
+            return null
+        }
+
+        if (css_name == "entry") {
+            try {
+                local placeholder = widget.get_placeholder_text()
+                if (placeholder != null && placeholder.len() > 0) return placeholder
+            } catch (e) {}
+        }
+
+        if (css_name == "button" || css_name == "checkbutton") {
+            try {
+                local label = widget.get_label()
+                if (label != null && label.len() > 0) return label
+            } catch (e) {}
+        }
+
+        if (css_name == "dropdown") return "Choose an option"
+        return null
+    }
+
+    function tooltip_is_empty(widget) {
+        try {
+            local text = widget.get_tooltip_text()
+            return text == null || text.len() == 0
+        } catch (e) {
+            return false
+        }
+    }
+
+    function apply_tooltip_if_missing(widget, text) {
+        if (widget == null || text == null || text.len() == 0) return widget
+        if (this.tooltip_is_empty(widget)) widget.set_tooltip_text(text)
+        return widget
+    }
+
+    function apply_default_tooltips(widget) {
+        if (widget == null) return
+        this.apply_tooltip_if_missing(widget, this.tooltip_text_for_control(widget))
+
+        local child = null
+        try {
+            child = widget.get_first_child()
+        } catch (e) {
+            child = null
+        }
+
+        while (child != null) {
+            this.apply_default_tooltips(child)
+            try {
+                child = child.get_next_sibling()
+            } catch (e) {
+                child = null
+            }
+        }
+    }
+
     function nav_button(text, icon_name, callback) {
-        local button = this.ui.action_button(text, icon_name, callback)
+        local button = this.ui.action_button(text, icon_name, callback, "Open the " + text + " page.")
         button.add_css_class("flat")
         return button
     }
@@ -242,6 +307,7 @@ class DoughApplication {
         this.clear_children(this.content_area)
         child.set_hexpand(true)
         child.set_vexpand(true)
+        this.apply_default_tooltips(child)
         this.content_area.append(child)
 
         if (this.page_title_label != null) this.page_title_label.set_text(title)
@@ -306,6 +372,8 @@ class DoughApplication {
         scroll.set_vexpand(true)
         scroll.set_child(child)
         card.append(scroll)
+
+        this.apply_default_tooltips(card)
 
         layer.add_overlay(card)
         this.app_overlay.add_overlay(layer)
@@ -739,6 +807,20 @@ class DoughApplication {
         return { paths = paths, labels = labels }
     }
 
+    function rule_envelope_options(rule) {
+        local opts = this.envelope_options(rule.type)
+        local path = this.envelope_path(rule.folder_id, rule.envelope_id)
+        if (path.len() == 0) return opts
+        if (this.document.find_envelope(rule.type, rule.folder_id, rule.envelope_id) != null)
+            return opts
+
+        local paths = [path]
+        local labels = ["Missing: " + path]
+        foreach (item in opts.paths) paths.push(item)
+        foreach (item in opts.labels) labels.push(item)
+        return { paths = paths, labels = labels }
+    }
+
     function type_label(type) {
         if (type == "income") return "Income"
         if (type == "expense") return "Expense"
@@ -800,12 +882,105 @@ class DoughApplication {
         return prefix + this.money(txn.amount)
     }
 
+    function parse_iso_date_parts(text) {
+        if (text == null || text.len() < 10) return null
+        try {
+            return {
+                year = text.slice(0, 4).tointeger(),
+                month = text.slice(5, 7).tointeger(),
+                day = text.slice(8, 10).tointeger()
+            }
+        } catch (e) {
+            return null
+        }
+    }
+
+    function iso_date_time(text) {
+        local parts = this.parse_iso_date_parts(text)
+        if (parts == null) return null
+        try {
+            return GLib.DateTime.new(GLib.TimeZone.new_utc(),
+                parts.year, parts.month, parts.day, 0, 0, 0.0)
+        } catch (e) {
+            return null
+        }
+    }
+
+    function select_calendar_date(calendar, text) {
+        local date = this.iso_date_time(text)
+        if (date == null) date = this.iso_date_time(this.document.start_date)
+        if (date != null) calendar.select_day(date)
+    }
+
+    function next_period_start(date) {
+        if (date == null) return null
+        if (this.document.period_length == "weekly") return date.add_days(7)
+        if (this.document.period_length == "fortnightly") return date.add_days(14)
+        return date.add_months(1)
+    }
+
+    function current_period_start_iso() {
+        local date = this.iso_date_time(this.document.start_date)
+        if (date == null) return this.document.start_date
+        for (local i = 0; i < this.document.period_index; i = i + 1)
+            date = this.next_period_start(date)
+        return date.format("%Y-%m-%d")
+    }
+
+    function current_period_end_iso() {
+        local start = this.iso_date_time(this.current_period_start_iso())
+        local next = this.next_period_start(start)
+        if (next == null) return this.current_period_start_iso()
+        return next.add_days(-1).format("%Y-%m-%d")
+    }
+
+    function calendar_iso_date(calendar) {
+        local date = calendar.get_date()
+        if (date == null) return ""
+        return date.format("%Y-%m-%d")
+    }
+
+    function show_date_picker(entry, anchor) {
+        local pop = Gtk.Popover.new()
+        pop.set_parent(anchor)
+        pop.set_has_arrow(true)
+        pop.set_position(Gtk.PositionType.bottom)
+
+        local root = this.ui.padded_box(Gtk.Orientation.vertical, 8, 8)
+        local calendar = Gtk.Calendar.new()
+        this.select_calendar_date(calendar, entry.get_text())
+        calendar.connect("day-selected", function() {
+            entry.set_text(this.calendar_iso_date(calendar))
+            pop.popdown()
+            pop.unparent()
+        }.bindenv(this))
+        root.append(calendar)
+
+        pop.set_child(root)
+        pop.popup()
+    }
+
+    function date_picker(entry) {
+        local box = Gtk.Box.new(Gtk.Orientation.horizontal, 6)
+        entry.set_hexpand(true)
+        this.apply_tooltip_if_missing(entry, "Enter a date as YYYY-MM-DD, or use the picker.")
+        box.append(entry)
+
+        local button = null
+        button = this.ui.plain_button("Pick", function() {
+            this.show_date_picker(entry, button)
+        }.bindenv(this), "Open the calendar date picker.")
+        box.append(button)
+        return box
+    }
+
     function labeled_control(label_text, control) {
         local row = Gtk.Box.new(Gtk.Orientation.horizontal, 10)
         local label = Gtk.Label.new(label_text)
         label.set_xalign(0.0)
         label.set_size_request(120, -1)
         row.append(label)
+        this.apply_tooltip_if_missing(control, label_text)
         control.set_hexpand(true)
         row.append(control)
         return row
@@ -1377,19 +1552,25 @@ class DoughApplication {
         local search_entry = Gtk.Entry.new()
         search_entry.set_hexpand(true)
         search_entry.set_placeholder_text("Search transactions")
+        search_entry.set_tooltip_text("Filter transactions by description text.")
         local start_entry = Gtk.Entry.new()
         start_entry.set_placeholder_text("Start date")
+        start_entry.set_tooltip_text("Only show transactions on or after this date.")
         local end_entry = Gtk.Entry.new()
         end_entry.set_placeholder_text("End date")
+        end_entry.set_tooltip_text("Only show transactions on or before this date.")
         local account_filter = this.account_options(true, false)
         local account_filter_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_filter.labels), null)
+        account_filter_dropdown.set_tooltip_text("Filter transactions by account.")
         local type_filter_values = ["", "income", "expense", "transfer"]
         local type_filter_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["All types", "Income", "Expense", "Transfer"]), null)
+        type_filter_dropdown.set_tooltip_text("Filter transactions by transaction type.")
         local path_filter_entry = Gtk.Entry.new()
         path_filter_entry.set_placeholder_text("Envelope")
+        path_filter_entry.set_tooltip_text("Filter transactions by envelope or folder text.")
         filter_box.append(search_entry)
-        filter_box.append(start_entry)
-        filter_box.append(end_entry)
+        filter_box.append(this.date_picker(start_entry))
+        filter_box.append(this.date_picker(end_entry))
         filter_box.append(account_filter_dropdown)
         filter_box.append(type_filter_dropdown)
         filter_box.append(path_filter_entry)
@@ -1666,16 +1847,19 @@ class DoughApplication {
 
         local date_entry = Gtk.Entry.new()
         date_entry.set_text(txn.date)
-        root.append(this.labeled_control("Date", date_entry))
+        date_entry.set_tooltip_text("Transaction date in YYYY-MM-DD format.")
+        root.append(this.labeled_control("Date", this.date_picker(date_entry)))
 
         local account_opts = this.account_options(false, true)
         local account_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_opts.labels), null)
         account_dropdown.set_selected(this.index_for_value(account_opts.ids, txn.account_id, 0))
+        account_dropdown.set_tooltip_text("Choose the account where this transaction happened.")
         root.append(this.labeled_control("Account", account_dropdown))
 
         local type_values = ["income", "expense", "transfer"]
         local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Income", "Expense", "Transfer"]), null)
         type_dropdown.set_selected(this.index_for_value(type_values, txn.type, 1))
+        type_dropdown.set_tooltip_text("Choose whether this is income, an expense, or a transfer.")
         root.append(this.labeled_control("Type", type_dropdown))
 
         local selected_type = this.dropdown_value(type_values, type_dropdown, txn.type)
@@ -1686,6 +1870,7 @@ class DoughApplication {
             this.envelope_path(txn.folder_id, txn.envelope_id),
             0))
         envelope_dropdown.set_sensitive(selected_type != "transfer")
+        envelope_dropdown.set_tooltip_text("Choose the envelope this transaction belongs to.")
         root.append(this.labeled_control("Envelope", envelope_dropdown))
 
         local refresh_envelope_dropdown = function(preferred_path = null) {
@@ -1704,15 +1889,18 @@ class DoughApplication {
 
         local description_entry = Gtk.Entry.new()
         description_entry.set_text(txn.description)
+        description_entry.set_tooltip_text("Human-readable transaction description.")
         root.append(this.labeled_control("Description", description_entry))
 
         local amount_entry = Gtk.Entry.new()
         amount_entry.set_text(this.amount_text(txn.amount))
+        amount_entry.set_tooltip_text("Transaction amount without currency symbol.")
         root.append(this.labeled_control("Amount", amount_entry))
 
         local transfer_opts = this.account_options(false, true)
         local transfer_dropdown = Gtk.DropDown.new(Gtk.StringList.new(transfer_opts.labels), null)
         transfer_dropdown.set_selected(this.index_for_value(transfer_opts.ids, txn.transfer_account_id, 0))
+        transfer_dropdown.set_tooltip_text("Choose the destination account for transfers.")
         root.append(this.labeled_control("Transfer to", transfer_dropdown))
 
         local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
@@ -1728,13 +1916,18 @@ class DoughApplication {
             refresh_envelope_dropdown(path.folder_id + "/" + path.envelope_id)
             if (path.created) this.persist_document()
             this.set_status("Matched " + description_entry.get_text() + " to " + path.name + ".")
-        }.bindenv(this)))
+        }.bindenv(this), "Use import match rules to suggest an envelope."))
 
         local dialog = null
         actions.append(this.ui.plain_button("Save", function() {
             local amount = this.parse_amount(amount_entry.get_text())
             if (amount == null) {
                 this.set_status("Enter a valid transaction amount.")
+                return
+            }
+
+            if (this.iso_date_time(date_entry.get_text()) == null) {
+                this.set_status("Choose a valid transaction date.")
                 return
             }
 
@@ -1770,7 +1963,7 @@ class DoughApplication {
             this.persist_document(add_on_save ? "Added transaction." : "Updated transaction.")
             if (refresh != null) refresh()
             if (dialog != null) dialog.close()
-        }.bindenv(this)))
+        }.bindenv(this), "Save this transaction."))
         root.append(actions)
 
         dialog = this.show_overlay(add_on_save ? "Add Transaction" : "Edit Transaction", root, 680, 480)
@@ -2063,17 +2256,20 @@ class DoughApplication {
         local path_entry = Gtk.Entry.new()
         path_entry.set_hexpand(true)
         path_entry.set_placeholder_text("CSV or QIF path")
+        path_entry.set_tooltip_text("Path to the CSV or QIF file to import.")
         local format_list = Gtk.StringList.new(["CSV", "QIF"])
         local format_dropdown = Gtk.DropDown.new(format_list, null)
+        format_dropdown.set_tooltip_text("Choose the import file format.")
         local account_opts = this.account_options(false, true)
         local account_dropdown = Gtk.DropDown.new(Gtk.StringList.new(account_opts.labels), null)
         account_dropdown.set_selected(this.index_for_value(account_opts.ids, this.first_account_id(), 0))
+        account_dropdown.set_tooltip_text("Choose the account imported transactions belong to.")
         source_box.append(path_entry)
         source_box.append(this.ui.plain_button("Choose & Import", function() {
             this.choose_import_file(path_entry, format_dropdown, function(path) {
                 if (run_import != null) run_import()
             })
-        }.bindenv(this)))
+        }.bindenv(this), "Choose a CSV or QIF file and import it immediately."))
         source_box.append(format_dropdown)
         source_box.append(account_dropdown)
         root.append(source_box)
@@ -2082,20 +2278,27 @@ class DoughApplication {
         local date_col = Gtk.Entry.new()
         date_col.set_placeholder_text("Date col")
         date_col.set_text("0")
+        date_col.set_tooltip_text("Zero-based CSV column index containing the transaction date.")
         local description_col = Gtk.Entry.new()
         description_col.set_placeholder_text("Description col")
         description_col.set_text("1")
+        description_col.set_tooltip_text("Zero-based CSV column index containing the transaction description.")
         local amount_col = Gtk.Entry.new()
         amount_col.set_placeholder_text("Amount col")
         amount_col.set_text("2")
+        amount_col.set_tooltip_text("Zero-based CSV column index containing signed transaction amounts.")
         local memo_col = Gtk.Entry.new()
         memo_col.set_placeholder_text("Memo col")
+        memo_col.set_tooltip_text("Optional zero-based CSV column index for memo text.")
         local debit_col = Gtk.Entry.new()
         debit_col.set_placeholder_text("Debit col")
+        debit_col.set_tooltip_text("Optional zero-based CSV column index for debit amounts.")
         local credit_col = Gtk.Entry.new()
         credit_col.set_placeholder_text("Credit col")
+        credit_col.set_tooltip_text("Optional zero-based CSV column index for credit amounts.")
         local skip_header = Gtk.CheckButton.new_with_label("Header row")
         skip_header.set_active(true)
+        skip_header.set_tooltip_text("Skip the first CSV row when it contains column names.")
         csv_box.append(date_col)
         csv_box.append(description_col)
         csv_box.append(amount_col)
@@ -2146,10 +2349,10 @@ class DoughApplication {
         local import_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         import_actions.append(this.ui.plain_button("Import", function() {
             run_import()
-        }.bindenv(this)))
+        }.bindenv(this), "Import transactions using the current settings."))
         import_actions.append(this.ui.plain_button("Export QIF", function() {
             this.export_qif(path_entry.get_text())
-        }.bindenv(this)))
+        }.bindenv(this), "Export current transactions to the path above in QIF format."))
         root.append(import_actions)
         root.append(import_status)
 
@@ -2160,7 +2363,7 @@ class DoughApplication {
 
         local rule_actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         rule_actions.append(this.ui.plain_button("Add Rule", function() {
-            local path = this.ensure_envelope_path("expense")
+            local path = this.first_envelope_path("expense")
             local rule = Models.ImportRule(
                 this.make_id("rule"),
                 "New Rule",
@@ -2172,7 +2375,7 @@ class DoughApplication {
             this.document.add_import_rule(rule)
             this.add_import_rule_editor_row(rules_data.list, rule)
             this.persist_document("Added import match rule.")
-        }.bindenv(this)))
+        }.bindenv(this), "Add a regex rule that assigns matching transactions to an envelope."))
         rule_actions.append(this.ui.plain_button("Reset Defaults", function() {
             this.confirm_action(
                 "Reset Match Rules",
@@ -2184,7 +2387,7 @@ class DoughApplication {
                     this.persist_document("Restored default import match rules.")
                 }.bindenv(this),
                 "Reset Rules")
-        }.bindenv(this)))
+        }.bindenv(this), "Replace match rules with Dough's default starter rules."))
         root.append(rule_actions)
 
         this.show_window("Import Transactions", root, 1040, 680)
@@ -2198,87 +2401,47 @@ class DoughApplication {
 
     function add_import_rule_editor_row(list, rule) {
         local row = Gtk.ListBoxRow.new()
-        local box = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        local box = Gtk.Box.new(Gtk.Orientation.vertical, 7)
         box.set_margin_top(8)
         box.set_margin_bottom(8)
         box.set_margin_start(10)
         box.set_margin_end(10)
 
+        if (rule.type != "income" && rule.type != "expense")
+            rule.type = "expense"
+
+        local header = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
         local enabled = Gtk.CheckButton.new_with_label("On")
         enabled.set_active(rule.enabled)
+        enabled.set_tooltip_text("Enable or disable this match rule.")
         enabled.connect("toggled", function() {
             rule.enabled = enabled.get_active()
             this.persist_document()
         }.bindenv(this))
-        box.append(enabled)
+        header.append(enabled)
 
         local name_entry = Gtk.Entry.new()
+        name_entry.set_hexpand(true)
         name_entry.set_placeholder_text("Name")
         name_entry.set_text(rule.name)
+        name_entry.set_tooltip_text("Short label for this match rule.")
         name_entry.connect("changed", function() {
             rule.name = name_entry.get_text()
             this.persist_document()
         }.bindenv(this))
-        box.append(name_entry)
-
-        local pattern_entry = Gtk.Entry.new()
-        pattern_entry.set_hexpand(true)
-        pattern_entry.set_placeholder_text("Regex pattern")
-        pattern_entry.set_text(rule.pattern)
-        pattern_entry.connect("changed", function() {
-            rule.pattern = pattern_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(pattern_entry)
-
-        local type_entry = Gtk.Entry.new()
-        type_entry.set_placeholder_text("Type")
-        type_entry.set_text(rule.type)
-        type_entry.connect("changed", function() {
-            rule.type = type_entry.get_text()
-            this.persist_document()
-        }.bindenv(this))
-        box.append(type_entry)
-
-        local path_entry = Gtk.Entry.new()
-        path_entry.set_hexpand(true)
-        path_entry.set_placeholder_text("folder_id/envelope_id")
-        path_entry.set_text(rule.folder_id + "/" + rule.envelope_id)
-        path_entry.connect("changed", function() {
-            local text = path_entry.get_text()
-            local slash = text.find("/")
-            if (slash != null) {
-                local folder_id = text.slice(0, slash)
-                local envelope_id = text.slice(slash + 1)
-                if (this.document.find_envelope(type_entry.get_text(), folder_id, envelope_id) == null) {
-                    this.set_status("Rule target is not a real envelope: " + text)
-                    return
-                }
-                rule.folder_id = folder_id
-                rule.envelope_id = envelope_id
-                this.persist_document()
-            }
-        }.bindenv(this))
-        box.append(path_entry)
+        header.append(name_entry)
 
         local priority_entry = Gtk.Entry.new()
         priority_entry.set_placeholder_text("Priority")
         priority_entry.set_text("" + rule.priority)
+        priority_entry.set_tooltip_text("Lower numbers run first when multiple rules match.")
         priority_entry.connect("changed", function() {
             rule.priority = this.parse_column_index(priority_entry.get_text(), rule.priority)
             this.persist_document()
         }.bindenv(this))
-        box.append(priority_entry)
+        header.append(priority_entry)
 
-        local test_entry = Gtk.Entry.new()
-        test_entry.set_placeholder_text("Test text")
-        box.append(test_entry)
-        box.append(this.ui.plain_button("Test", function() {
-            local matched = this.regex_matches(pattern_entry.get_text(), test_entry.get_text())
-            this.set_status(rule.name + ": " + (matched ? "matched" : "no match"))
-        }.bindenv(this)))
-
-        box.append(this.ui.plain_button("Delete", function() {
+        header.append(this.ui.plain_button("Delete", function() {
             this.confirm_action(
                 "Delete Match Rule",
                 "Delete the import match rule " + rule.name + "?",
@@ -2289,6 +2452,103 @@ class DoughApplication {
                 }.bindenv(this),
                 "Delete Rule")
         }.bindenv(this)))
+        box.append(header)
+
+        local pattern_row = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        pattern_row.append(this.ui.label("Pattern", "dim-label"))
+        local pattern_entry = Gtk.Entry.new()
+        pattern_entry.set_hexpand(true)
+        pattern_entry.set_placeholder_text("Regex pattern")
+        pattern_entry.set_text(rule.pattern)
+        pattern_entry.set_tooltip_text("Regular expression matched against transaction descriptions.")
+        pattern_entry.connect("changed", function() {
+            rule.pattern = pattern_entry.get_text()
+            this.persist_document()
+        }.bindenv(this))
+        pattern_row.append(pattern_entry)
+        local test_entry = Gtk.Entry.new()
+        test_entry.set_placeholder_text("Test text")
+        test_entry.set_tooltip_text("Sample transaction description to test against this pattern.")
+        pattern_row.append(test_entry)
+        pattern_row.append(this.ui.plain_button("Test", function() {
+            local matched = this.regex_matches(pattern_entry.get_text(), test_entry.get_text())
+            local target = this.import_rule_target_label(rule)
+            this.set_status(rule.name + ": " + (matched ? "matched -> " + target : "no match"))
+        }.bindenv(this), "Test this regex against the sample text."))
+        box.append(pattern_row)
+
+        local target_row = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        target_row.append(this.ui.label("Target", "dim-label"))
+        local type_values = ["expense", "income"]
+        local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Expense", "Income"]), null)
+        type_dropdown.set_selected(this.index_for_value(type_values, rule.type, 0))
+        type_dropdown.set_tooltip_text("Choose whether this rule targets expense or income envelopes.")
+        target_row.append(type_dropdown)
+
+        local envelope_opts = this.rule_envelope_options(rule)
+        local envelope_dropdown = Gtk.DropDown.new(Gtk.StringList.new(envelope_opts.labels), null)
+        envelope_dropdown.set_hexpand(true)
+        envelope_dropdown.set_selected(this.index_for_value(
+            envelope_opts.paths,
+            this.envelope_path(rule.folder_id, rule.envelope_id),
+            0))
+        envelope_dropdown.set_tooltip_text("Choose the envelope assigned when this rule matches.")
+        target_row.append(envelope_dropdown)
+
+        local target_status = this.ui.label(this.import_rule_target_label(rule), "dim-label")
+        target_status.set_hexpand(true)
+        target_row.append(target_status)
+
+        local apply_rule_target = function() {
+            local selected_type = this.dropdown_value(type_values, type_dropdown, rule.type)
+            local path_text = this.dropdown_value(envelope_opts.paths, envelope_dropdown, "")
+            if (path_text.len() == 0) {
+                rule.type = selected_type
+                rule.folder_id = ""
+                rule.envelope_id = ""
+                target_status.set_text("No target")
+                this.persist_document()
+                this.set_status("Choose an envelope target for " + rule.name + ".")
+                return
+            }
+
+            local slash = path_text.find("/")
+            if (slash == null) return
+            local folder_id = path_text.slice(0, slash)
+            local envelope_id = path_text.slice(slash + 1)
+            local envelope = this.document.find_envelope(selected_type, folder_id, envelope_id)
+            if (envelope == null) {
+                target_status.set_text("Missing: " + path_text)
+                this.set_status("Rule target is not a real envelope: " + path_text)
+                return
+            }
+
+            rule.type = selected_type
+            rule.folder_id = folder_id
+            rule.envelope_id = envelope_id
+            target_status.set_text(this.import_rule_target_label(rule))
+            this.persist_document()
+        }.bindenv(this)
+
+        local refresh_rule_envelope_dropdown = function() {
+            local selected_type = this.dropdown_value(type_values, type_dropdown, rule.type)
+            envelope_opts = selected_type == rule.type ?
+                this.rule_envelope_options(rule) :
+                this.envelope_options(selected_type)
+            envelope_dropdown.set_model(Gtk.StringList.new(envelope_opts.labels))
+            local wanted = selected_type == rule.type ?
+                this.envelope_path(rule.folder_id, rule.envelope_id) : ""
+            envelope_dropdown.set_selected(this.index_for_value(envelope_opts.paths, wanted, 0))
+        }.bindenv(this)
+
+        type_dropdown.connect("notify::selected", function(_) {
+            refresh_rule_envelope_dropdown()
+            apply_rule_target()
+        })
+        envelope_dropdown.connect("notify::selected", function(_) {
+            apply_rule_target()
+        })
+        box.append(target_row)
 
         row.set_child(box)
         list.append(row)
@@ -2409,6 +2669,7 @@ class DoughApplication {
         local type_values = ["expense", "income"]
         local type_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Expense", "Income"]), null)
         type_dropdown.set_selected(this.index_for_value(type_values, envelope.type, 0))
+        type_dropdown.set_tooltip_text("Choose whether this budget row is income or expense.")
         box.append(type_dropdown)
 
         local envelope_opts = this.budget_envelope_options(envelope.type, envelope)
@@ -2418,6 +2679,7 @@ class DoughApplication {
             envelope_opts.paths,
             this.envelope_path(envelope.folder_id, envelope.envelope_id),
             0))
+        envelope_dropdown.set_tooltip_text("Choose the catalog envelope for this budget row.")
         box.append(envelope_dropdown)
 
         local apply_envelope_selection = function() {
@@ -2466,6 +2728,7 @@ class DoughApplication {
         local allocation_entry = Gtk.Entry.new()
         allocation_entry.set_placeholder_text("Allocated")
         allocation_entry.set_text(this.amount_text(envelope.budgeted))
+        allocation_entry.set_tooltip_text("Amount allocated to this envelope for the current period.")
         allocation_entry.connect("changed", function() {
             local value = this.parse_amount(allocation_entry.get_text())
             if (value == null) return
@@ -2824,23 +3087,27 @@ class DoughApplication {
         mode_entry.set_hexpand(true)
         mode_entry.set_placeholder_text("Mode")
         mode_entry.set_text(title.find("Pie") == null ? "Income vs Expenses" : "Expense Envelopes")
+        mode_entry.set_tooltip_text("Chart mode label used for this graph view.")
         local start_entry = Gtk.Entry.new()
         start_entry.set_placeholder_text("Start date")
-        start_entry.set_text(this.document.start_date)
+        start_entry.set_text(this.current_period_start_iso())
+        start_entry.set_tooltip_text("Graph start date in YYYY-MM-DD format.")
         local end_entry = Gtk.Entry.new()
         end_entry.set_placeholder_text("End date")
-        end_entry.set_text(this.document.current_period())
+        end_entry.set_text(this.current_period_end_iso())
+        end_entry.set_tooltip_text("Graph end date in YYYY-MM-DD format.")
         local export_entry = Gtk.Entry.new()
         export_entry.set_hexpand(true)
         export_entry.set_placeholder_text("PNG path")
         export_entry.set_text(this.default_export_path(title.find("Pie") == null ? "dough-line-graph.png" : "dough-pie-chart.png"))
+        export_entry.set_tooltip_text("Destination path for exported PNG chart.")
         controls.append(mode_entry)
-        controls.append(start_entry)
-        controls.append(end_entry)
+        controls.append(this.date_picker(start_entry))
+        controls.append(this.date_picker(end_entry))
         controls.append(export_entry)
         controls.append(this.ui.plain_button("Export PNG", function() {
             this.export_graph_png(export_entry.get_text(), title.find("Pie") != null)
-        }.bindenv(this)))
+        }.bindenv(this), "Export this chart, including its legend, as a PNG."))
         root.append(controls)
 
         local area = Gtk.DrawingArea.new()
@@ -2860,27 +3127,93 @@ class DoughApplication {
         this.draw_graph(cr, width, height)
     }
 
+    function short_legend_text(text, max_chars = 28) {
+        if (text == null) return ""
+        if (text.len() <= max_chars) return text
+        if (max_chars <= 3) return text.slice(0, max_chars)
+        return text.slice(0, max_chars - 3) + "..."
+    }
+
+    function draw_legend_item(cr, x, y, color, text) {
+        cr.set_source_rgba(color[0], color[1], color[2], 0.88)
+        cr.rectangle(x, y, 12, 12)
+        cr.fill()
+
+        cr.set_source_rgb(0.16, 0.20, 0.22)
+        cr.select_font_face("Sans", 0, 0)
+        cr.set_font_size(12)
+        cr.move_to(x + 18, y + 11)
+        cr.show_text(this.short_legend_text(text))
+    }
+
+    function budget_usage_color(spent, budgeted) {
+        if (budgeted > 0.0 && spent > budgeted) return [0.74, 0.16, 0.15]
+        if (budgeted > 0.0 && spent / budgeted > 0.85) return [0.76, 0.45, 0.12]
+        return [0.15, 0.45, 0.55]
+    }
+
     function draw_graph(cr, width, height) {
         cr.set_source_rgb(0.96, 0.96, 0.94)
         cr.rectangle(0, 0, width, height)
         cr.fill()
+
+        local legend_width = width > 520 ? 190.0 : 0.0
+        local plot_left = 40.0
+        local plot_right = width - 30.0 - legend_width
+        if (plot_right < plot_left + 160.0) plot_right = width - 30.0
+        local plot_bottom = height - 64.0
+        local plot_top = 36.0
+        local plot_height = plot_bottom - plot_top
+
         cr.set_source_rgb(0.16, 0.20, 0.22)
         cr.set_line_width(2)
-        cr.move_to(40, height - 40)
-        cr.line_to(width - 30, height - 40)
-        cr.move_to(40, 30)
-        cr.line_to(40, height - 40)
+        cr.move_to(plot_left, plot_bottom)
+        cr.line_to(plot_right, plot_bottom)
+        cr.move_to(plot_left, plot_top)
+        cr.line_to(plot_left, plot_bottom)
         cr.stroke()
 
-        local x = 70.0
+        local count = this.document.budgets.len()
+        local step = count == 0 ? 78.0 : (plot_right - plot_left - 28.0) / count
+        if (step > 78.0) step = 78.0
+        if (step < 16.0) step = 16.0
+        local bar_width = step - 12.0
+        if (bar_width < 6.0) bar_width = 6.0
+        local label_chars = (step / 6.0).tointeger()
+        if (label_chars < 3) label_chars = 3
+        if (label_chars > 12) label_chars = 12
+
+        local x = plot_left + 28.0
         foreach (item in this.document.budgets) {
             local spent = this.document.budget_spent(item)
-            local bar_height = item.budgeted == 0.0 ? 4.0 : (spent / item.budgeted) * 190.0
-            if (bar_height > 230.0) bar_height = 230.0
-            cr.set_source_rgba(0.15, 0.45, 0.55, 0.78)
-            cr.rectangle(x, height - 40 - bar_height, 54, bar_height)
+            local bar_height = item.budgeted == 0.0 ? 4.0 : (spent / item.budgeted) * plot_height
+            if (bar_height > plot_height) bar_height = plot_height
+            local c = this.budget_usage_color(spent, item.budgeted)
+            cr.set_source_rgba(c[0], c[1], c[2], 0.78)
+            cr.rectangle(x, plot_bottom - bar_height, bar_width, bar_height)
             cr.fill()
-            x = x + 78.0
+
+            cr.set_source_rgb(0.16, 0.20, 0.22)
+            cr.select_font_face("Sans", 0, 0)
+            cr.set_font_size(11)
+            cr.move_to(x, plot_bottom + 18.0)
+            cr.show_text(this.short_legend_text(this.document.budget_name(item), label_chars))
+
+            x = x + step
+            if (x > plot_right - bar_width) break
+        }
+
+        if (legend_width > 0.0) {
+            local legend_x = width - legend_width + 12.0
+            local legend_y = 42.0
+            cr.set_source_rgb(0.16, 0.20, 0.22)
+            cr.select_font_face("Sans", 0, 1)
+            cr.set_font_size(13)
+            cr.move_to(legend_x, legend_y - 12.0)
+            cr.show_text("Legend")
+            this.draw_legend_item(cr, legend_x, legend_y, [0.15, 0.45, 0.55], "Within allocation")
+            this.draw_legend_item(cr, legend_x, legend_y + 22.0, [0.76, 0.45, 0.12], "Near allocation")
+            this.draw_legend_item(cr, legend_x, legend_y + 44.0, [0.74, 0.16, 0.15], "Over allocation")
         }
     }
 
@@ -2902,27 +3235,65 @@ class DoughApplication {
             [0.74, 0.16, 0.15],
             [0.36, 0.30, 0.58]
         ]
-        local cx = width / 2.0
-        local cy = height / 2.0
-        local radius = (width < height ? width : height) / 3.0
-        local angle = -1.57079632679
-        local color_index = 0
 
+        local slices = []
+        local color_index = 0
         foreach (item in this.document.budgets) {
             if (item.type != "expense") continue
             local value = this.document.budget_spent(item)
             if (value <= 0.0) value = item.budgeted
             if (value <= 0.0) continue
+            slices.push({
+                item = item,
+                value = value,
+                color = colors[color_index % colors.len()]
+            })
+            color_index = color_index + 1
+        }
+        if (slices.len() == 0) return
 
-            local next_angle = angle + ((value / total) * 6.28318530718)
-            local c = colors[color_index % colors.len()]
+        local legend_width = width > 520 ? 220.0 : 0.0
+        local chart_width = width - legend_width
+        local cx = chart_width / 2.0
+        local cy = height / 2.0
+        local radius = (chart_width < height ? chart_width : height) / 3.0
+        local angle = -1.57079632679
+
+        foreach (slice in slices) {
+            local next_angle = angle + ((slice.value / total) * 6.28318530718)
+            local c = slice.color
             cr.set_source_rgba(c[0], c[1], c[2], 0.88)
             cr.move_to(cx, cy)
             cr.arc(cx, cy, radius, angle, next_angle)
             cr.close_path()
             cr.fill()
             angle = next_angle
-            color_index = color_index + 1
+        }
+
+        if (legend_width > 0.0) {
+            local legend_x = width - legend_width + 12.0
+            local legend_y = 42.0
+            cr.set_source_rgb(0.16, 0.20, 0.22)
+            cr.select_font_face("Sans", 0, 1)
+            cr.set_font_size(13)
+            cr.move_to(legend_x, legend_y - 12.0)
+            cr.show_text("Legend")
+
+            local max_rows = ((height - legend_y - 12.0) / 22.0).tointeger()
+            if (max_rows < 1) max_rows = 1
+            local rows = slices.len() > max_rows ? max_rows : slices.len()
+            for (local i = 0; i < rows; i = i + 1) {
+                local slice = slices[i]
+                local label = this.document.budget_name(slice.item) + " " + this.money(slice.value)
+                this.draw_legend_item(cr, legend_x, legend_y + (i * 22.0), slice.color, label)
+            }
+            if (slices.len() > rows) {
+                cr.set_source_rgb(0.16, 0.20, 0.22)
+                cr.select_font_face("Sans", 0, 0)
+                cr.set_font_size(12)
+                cr.move_to(legend_x, legend_y + (rows * 22.0) + 11.0)
+                cr.show_text("+" + (slices.len() - rows) + " more")
+            }
         }
     }
 
@@ -2934,19 +3305,23 @@ class DoughApplication {
 
         local title_entry = Gtk.Entry.new()
         title_entry.set_text(this.document.title)
+        title_entry.set_tooltip_text("Budget document title.")
         local currency_entry = Gtk.Entry.new()
         currency_entry.set_text(this.document.currency)
+        currency_entry.set_tooltip_text("Currency symbol shown next to money amounts.")
         local reserve_entry = Gtk.Entry.new()
         reserve_entry.set_text(this.amount_text(this.document.reserve_amount))
+        reserve_entry.set_tooltip_text("Amount set aside before assigning money to expense envelopes.")
         local reserve_check = Gtk.CheckButton.new_with_label("Reserve enabled")
         reserve_check.set_active(this.document.reserve_enabled)
-        local date_format_entry = Gtk.Entry.new()
-        date_format_entry.set_text(this.document.date_format)
+        reserve_check.set_tooltip_text("Enable or disable the reserve amount in budget calculations.")
         local start_date_entry = Gtk.Entry.new()
         start_date_entry.set_text(this.document.start_date)
+        start_date_entry.set_tooltip_text("Budget period start date in YYYY-MM-DD format.")
         local period_values = ["weekly", "fortnightly", "monthly"]
         local period_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Weekly", "Fortnightly", "Monthly"]), null)
         period_dropdown.set_selected(this.index_for_value(period_values, this.document.period_length, 2))
+        period_dropdown.set_tooltip_text("Choose how long each budget period lasts.")
 
         root.append(this.ui.label("Budget Title"))
         root.append(title_entry)
@@ -2955,10 +3330,8 @@ class DoughApplication {
         root.append(reserve_check)
         root.append(this.ui.label("Reserve Amount"))
         root.append(reserve_entry)
-        root.append(this.ui.label("Date Format"))
-        root.append(date_format_entry)
         root.append(this.ui.label("Start Date"))
-        root.append(start_date_entry)
+        root.append(this.date_picker(start_date_entry))
         root.append(this.ui.label("Period Length"))
         root.append(period_dropdown)
         root.append(this.ui.plain_button("Apply", function() {
@@ -2967,12 +3340,15 @@ class DoughApplication {
             this.document.reserve_enabled = reserve_check.get_active()
             local reserve = this.parse_amount(reserve_entry.get_text())
             if (reserve != null) this.document.reserve_amount = reserve
-            this.document.date_format = date_format_entry.get_text()
+            if (this.iso_date_time(start_date_entry.get_text()) == null) {
+                this.set_status("Choose a valid budget start date.")
+                return
+            }
             this.document.start_date = start_date_entry.get_text()
             this.document.period_length = this.dropdown_value(period_values, period_dropdown, "monthly")
             this.document.regenerate_periods()
             this.persist_document("Options applied and stored in Spinodb.")
-        }.bindenv(this)))
+        }.bindenv(this), "Save these document options."))
 
         this.show_window("Options", root, 520, 360)
     }

@@ -14,6 +14,12 @@ class WidgetFactory {
         return widget
     }
 
+    function tooltip(widget, text) {
+        if (widget != null && text != null && text.len() > 0)
+            widget.set_tooltip_text(text)
+        return widget
+    }
+
     function padded_box(orientation, spacing, margin = 12) {
         local box = Gtk.Box.new(orientation, spacing)
         box.set_margin_top(margin)
@@ -32,19 +38,21 @@ class WidgetFactory {
         return img
     }
 
-    function action_button(text, icon_name, callback) {
+    function action_button(text, icon_name, callback, tooltip_text = null) {
         local button = Gtk.Button.new()
         local content = Gtk.Box.new(Gtk.Orientation.horizontal, 6)
         content.append(this.image(icon_name, 20))
         content.append(Gtk.Label.new(text))
         button.set_child(content)
         button.connect("clicked", callback)
+        this.tooltip(button, tooltip_text != null ? tooltip_text : text)
         return button
     }
 
-    function plain_button(text, callback) {
+    function plain_button(text, callback, tooltip_text = null) {
         local button = Gtk.Button.new_with_label(text)
         button.connect("clicked", callback)
+        this.tooltip(button, tooltip_text != null ? tooltip_text : text)
         return button
     }
 
