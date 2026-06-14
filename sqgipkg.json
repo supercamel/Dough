@@ -3,7 +3,7 @@
   "entry": "main.nut",
   "sqgi_source": {
     "repo": "https://github.com/supercamel/sqgi.git",
-    "ref": "v0.1.4-alpha"
+    "ref": "v0.1.5-alpha"
   },
   "resources": [
     "assets"
