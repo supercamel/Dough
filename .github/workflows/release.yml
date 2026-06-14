@@ -1,10 +1,12 @@
 name: Release
 
 # Builds Linux AppImages (x86_64 + aarch64) and the Windows NSIS installer with
-# sqgipkg, then publishes them as release assets for tags like `1.2.3`.
+# sqgipkg. Version tags publish the artifacts as release assets.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - '[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
