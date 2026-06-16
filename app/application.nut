@@ -10,7 +10,9 @@ local Repository = import("repository.nut")
 local Helpers = import("ui_helpers.nut")
 
 const DOUGH_APP_ID = "dev.sam.dough"
+const DOUGH_APP_NAME = "Dough"
 const DOUGH_ICON_NAME = "dev.sam.dough"
+const DOUGH_DESKTOP_RELAUNCH_ENV = "DOUGH_DESKTOP_RELAUNCHED"
 
 class DoughApplication {
     app = null
@@ -35,9 +37,10 @@ class DoughApplication {
     tutorial_step_index = 0
     tutorial_state = null
     smoke_test = false
-    version = "0.1.10"
+    version = "0.1.11"
 
     constructor(options = null) {
+        this.configure_process_identity()
         this.smoke_test = options != null && "smoke" in options ? options.smoke : false
         local db_path = options != null && "db_path" in options ? options.db_path : null
         this.assets = Assets.AssetLocator()
@@ -51,6 +54,11 @@ class DoughApplication {
     }
 
     function run(argc, argv) {
+        if (!this.smoke_test) {
+            local desktop_path = this.install_appimage_desktop_entry()
+            if (desktop_path != null && this.maybe_relaunch_from_desktop(desktop_path)) return 0
+        }
+
         local self = this
         this.app.connect("activate", function() { self.activate() })
         local status = this.app.run(argc, argv)
@@ -69,7 +77,7 @@ class DoughApplication {
 
         this.window = Gtk.ApplicationWindow.new(this.app)
         this.window.set_default_size(1100, 760)
-        this.window.set_title("Dough")
+        this.window.set_title(DOUGH_APP_NAME)
         this.apply_window_icon(this.window)
 
         local header = Gtk.HeaderBar.new()
@@ -117,15 +125,44 @@ class DoughApplication {
         print(text + "\n")
     }
 
-    function configure_app_icon() {
-        local icon_path = this.assets.path(DOUGH_ICON_NAME + ".png")
-        if (icon_path == null) icon_path = this.assets.path("icon.png")
-        if (icon_path == null) return
+    function configure_process_identity() {
+        GLib.set_prgname(DOUGH_APP_ID)
+        GLib.set_application_name(DOUGH_APP_NAME)
+        Gtk.Window.set_default_icon_name(DOUGH_ICON_NAME)
+    }
 
+    function path_exists(path) {
+        return path != null && path != "" && Gio.File.new_for_path(path).query_exists(null)
+    }
+
+    function add_icon_search_path(theme, path) {
+        if (theme == null || !this.path_exists(path)) return
+        theme.add_search_path(path)
+    }
+
+    function configure_app_icon() {
         local display = Gdk.Display.get_default()
         if (display != null) {
             local theme = Gtk.IconTheme.get_for_display(display)
-            theme.add_search_path(GLib.path_get_dirname(icon_path))
+            this.add_icon_search_path(theme, GLib.build_filenamev([GLib.get_current_dir(), "assets"]))
+            this.add_icon_search_path(theme, GLib.build_filenamev([GLib.get_current_dir(), "share", "icons"]))
+            this.add_icon_search_path(theme, GLib.build_filenamev([GLib.get_current_dir(), "usr", "share", "icons"]))
+
+            local resources = GLib.getenv("SQGI_APP_RESOURCES")
+            if (resources != null && resources != "") {
+                this.add_icon_search_path(theme, GLib.build_filenamev([resources, "assets"]))
+            }
+
+            local appdir = GLib.getenv("SQGI_APPDIR")
+            if (appdir != null && appdir != "") {
+                this.add_icon_search_path(theme, GLib.build_filenamev([appdir, "share", "icons"]))
+                this.add_icon_search_path(theme, GLib.build_filenamev([appdir, "usr", "share", "icons"]))
+                this.add_icon_search_path(theme, GLib.build_filenamev([appdir, "assets"]))
+            }
+
+            local icon_path = this.assets.path(DOUGH_ICON_NAME + ".png")
+            if (icon_path == null) icon_path = this.assets.path("icon.png")
+            if (icon_path != null) this.add_icon_search_path(theme, GLib.path_get_dirname(icon_path))
         }
 
         Gtk.Window.set_default_icon_name(DOUGH_ICON_NAME)
@@ -139,6 +176,115 @@ class DoughApplication {
         } catch (e) {
             Gtk.Window.set_default_icon_name(DOUGH_ICON_NAME)
         }
+    }
+
+    function desktop_exec_quote(value) {
+        local out = "\""
+        for (local i = 0; i < value.len(); i++) {
+            local ch = value.slice(i, i + 1)
+            if (ch == "%") out += "%%"
+            else if (ch == "\\" || ch == "\"" || ch == "$" || ch == "`") out += "\\" + ch
+            else out += ch
+        }
+        return out + "\""
+    }
+
+    function desktop_launch_exec(appimage) {
+        return "env " + DOUGH_DESKTOP_RELAUNCH_ENV + "=1 " + this.desktop_exec_quote(appimage) + " %U"
+    }
+
+    function remove_owned_desktop_file(path) {
+        if (!this.path_exists(path)) return
+
+        try {
+            local text = GLib.file_get_contents(path)
+            if (text.find(DOUGH_APP_NAME) == null) return
+            if (text.find("X-Dough-AppImage=true") == null &&
+                text.find("Icon=dough") == null &&
+                text.find("StartupWMClass=dough") == null) return
+            GLib.remove(path)
+        } catch (e) {
+            print("desktop cleanup warning: " + e + "\n")
+        }
+    }
+
+    function maybe_relaunch_from_desktop(desktop_path) {
+        if (GLib.getenv("APPIMAGE") == null || GLib.getenv("APPIMAGE") == "") return false
+        if (GLib.getenv(DOUGH_DESKTOP_RELAUNCH_ENV) == "1") return false
+        if (GLib.getenv("DOUGH_DISABLE_DESKTOP_RELAUNCH") == "1") return false
+
+        try {
+            local info = Gio.DesktopAppInfo.new(DOUGH_APP_ID + ".desktop")
+            if (info == null) info = Gio.DesktopAppInfo.new_from_filename(desktop_path)
+            if (info == null) return false
+            return info.launch(null, null)
+        } catch (e) {
+            print("desktop relaunch warning: " + e + "\n")
+            return false
+        }
+    }
+
+    // GNOME/Wayland resolves dock icons through a desktop file visible to the shell.
+    function install_appimage_desktop_entry() {
+        local appimage = GLib.getenv("APPIMAGE")
+        if (appimage == null || appimage == "") return null
+
+        local data_dir = GLib.get_user_data_dir()
+        local appdir = GLib.getenv("SQGI_APPDIR")
+        if (data_dir == null || data_dir == "" || appdir == null || appdir == "") return null
+
+        try {
+            local desktop_dir = GLib.build_filenamev([data_dir, "applications"])
+            local icon_dir = GLib.build_filenamev([data_dir, "icons", "hicolor", "256x256", "apps"])
+            GLib.mkdir_with_parents(desktop_dir, 493)
+            GLib.mkdir_with_parents(icon_dir, 493)
+
+            local desktop_path = GLib.build_filenamev([desktop_dir, DOUGH_APP_ID + ".desktop"])
+            local icon_path = GLib.build_filenamev([icon_dir, DOUGH_ICON_NAME + ".png"])
+            local desktop_icon = DOUGH_ICON_NAME
+
+            this.remove_owned_desktop_file(GLib.build_filenamev([desktop_dir, "dough.desktop"]))
+
+            local icon_candidates = [
+                GLib.build_filenamev([appdir, "usr", "share", "icons", "hicolor", "256x256", "apps", DOUGH_ICON_NAME + ".png"]),
+                GLib.build_filenamev([appdir, DOUGH_ICON_NAME + ".png"]),
+                GLib.build_filenamev([appdir, "assets", DOUGH_ICON_NAME + ".png"]),
+                GLib.build_filenamev([appdir, "assets", "icon.png"]),
+                GLib.build_filenamev([GLib.get_current_dir(), "assets", DOUGH_ICON_NAME + ".png"]),
+                GLib.build_filenamev([GLib.get_current_dir(), "assets", "icon.png"])
+            ]
+            foreach (src_path in icon_candidates) {
+                if (!this.path_exists(src_path)) continue
+                Gio.File.new_for_path(src_path).copy(
+                    Gio.File.new_for_path(icon_path),
+                    Gio.FileCopyFlags.overwrite,
+                    null,
+                    null
+                )
+                desktop_icon = icon_path
+                break
+            }
+
+            local desktop =
+                "[Desktop Entry]\n" +
+                "Type=Application\n" +
+                "Name=" + DOUGH_APP_NAME + "\n" +
+                "Exec=" + this.desktop_launch_exec(appimage) + "\n" +
+                "Icon=" + desktop_icon + "\n" +
+                "Categories=Office;Finance;GTK;\n" +
+                "Terminal=false\n" +
+                "StartupNotify=true\n" +
+                "StartupWMClass=" + DOUGH_APP_ID + "\n" +
+                "X-Dough-AppImage=true\n"
+
+            GLib.file_set_contents(desktop_path, desktop, -1)
+            GLib.chmod(desktop_path, 493)
+
+            return desktop_path
+        } catch (e) {
+            print("desktop integration warning: " + e + "\n")
+        }
+        return null
     }
 
     function install_css() {
@@ -900,13 +1046,52 @@ class DoughApplication {
     }
 
     function parse_iso_date_parts(text) {
-        if (text == null || text.len() < 10) return null
+        local value = this.trim(text)
+        if (value.len() < 10) return null
+        if (value.slice(4, 5) != "-" || value.slice(7, 8) != "-") return null
+
+        local year_text = value.slice(0, 4)
+        local month_text = value.slice(5, 7)
+        local day_text = value.slice(8, 10)
+        if (!this.only_digits(year_text) || !this.only_digits(month_text) || !this.only_digits(day_text))
+            return null
+
         try {
             return {
-                year = text.slice(0, 4).tointeger(),
-                month = text.slice(5, 7).tointeger(),
-                day = text.slice(8, 10).tointeger()
+                year = year_text.tointeger(),
+                month = month_text.tointeger(),
+                day = day_text.tointeger()
             }
+        } catch (e) {
+            return null
+        }
+    }
+
+    function is_digit(ch) {
+        return ch >= "0" && ch <= "9"
+    }
+
+    function only_digits(text) {
+        if (text == null || text.len() == 0) return false
+        for (local i = 0; i < text.len(); i = i + 1) {
+            if (!this.is_digit(text.slice(i, i + 1))) return false
+        }
+        return true
+    }
+
+    function expand_date_year(year) {
+        if (year < 100) return year >= 70 ? 1900 + year : 2000 + year
+        return year
+    }
+
+    function date_from_parts(year, month, day) {
+        if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) return null
+        try {
+            local date = GLib.DateTime.new(GLib.TimeZone.new_utc(), year, month, day, 0, 0, 0.0)
+            if (date == null) return null
+            if (date.get_year() != year || date.get_month() != month || date.get_day_of_month() != day)
+                return null
+            return date
         } catch (e) {
             return null
         }
@@ -915,16 +1100,75 @@ class DoughApplication {
     function iso_date_time(text) {
         local parts = this.parse_iso_date_parts(text)
         if (parts == null) return null
-        try {
-            return GLib.DateTime.new(GLib.TimeZone.new_utc(),
-                parts.year, parts.month, parts.day, 0, 0, 0.0)
-        } catch (e) {
-            return null
+        return this.date_from_parts(parts.year, parts.month, parts.day)
+    }
+
+    function date_number_groups(text) {
+        local groups = []
+        local part = ""
+        for (local i = 0; i < text.len(); i = i + 1) {
+            local ch = text.slice(i, i + 1)
+            if (this.is_digit(ch)) {
+                part += ch
+            } else if (part.len() > 0) {
+                groups.push(part)
+                part = ""
+            }
         }
+        if (part.len() > 0) groups.push(part)
+        return groups
+    }
+
+    function prefer_month_first_dates() {
+        return this.document != null && this.document.date_format != null &&
+            this.document.date_format.find("MM") == 0
+    }
+
+    function format_date_candidate(year, month, day) {
+        local date = this.date_from_parts(this.expand_date_year(year), month, day)
+        if (date == null) return null
+        return date.format("%Y-%m-%d")
+    }
+
+    function normalized_date_text(text, fallback = null) {
+        local value = this.trim(text)
+        if (value.len() == 0) return fallback
+
+        local iso = this.iso_date_time(value)
+        if (iso != null) return iso.format("%Y-%m-%d")
+
+        local groups = this.date_number_groups(value)
+        if (groups.len() == 1 && groups[0].len() == 8) {
+            local compact = groups[0]
+            return this.format_date_candidate(
+                compact.slice(0, 4).tointeger(),
+                compact.slice(4, 6).tointeger(),
+                compact.slice(6, 8).tointeger())
+        }
+
+        if (groups.len() < 3) return fallback
+
+        local a = groups[0].tointeger()
+        local b = groups[1].tointeger()
+        local c = groups[2].tointeger()
+        if (groups[0].len() == 4) return this.format_date_candidate(a, b, c)
+
+        local month_first = this.prefer_month_first_dates()
+        if (a > 12 && b <= 12) month_first = false
+        else if (b > 12 && a <= 12) month_first = true
+
+        local normalized = month_first ?
+            this.format_date_candidate(c, a, b) :
+            this.format_date_candidate(c, b, a)
+        if (normalized != null) return normalized
+
+        return month_first ?
+            this.format_date_candidate(c, b, a) :
+            this.format_date_candidate(c, a, b)
     }
 
     function select_calendar_date(calendar, text) {
-        local date = this.iso_date_time(text)
+        local date = this.iso_date_time(this.normalized_date_text(text, ""))
         if (date == null) date = this.iso_date_time(this.document.start_date)
         if (date != null) calendar.select_day(date)
     }
@@ -1289,6 +1533,8 @@ class DoughApplication {
         local amount = signed_amount
         if (amount == null) return null
 
+        local default_date = this.normalized_date_text(this.document.start_date, this.document.start_date)
+        local normalized_date = this.normalized_date_text(date, default_date)
         local type = amount < 0.0 ? "expense" : "income"
         if (amount < 0.0) amount = amount * -1.0
         local rule = this.match_import_rule(description, type)
@@ -1297,7 +1543,7 @@ class DoughApplication {
         return Models.Transaction(
             this.make_id("import"),
             account_id != null && account_id.len() > 0 ? account_id : this.first_account_id(),
-            date != null && date.len() > 0 ? date : this.document.start_date,
+            normalized_date,
             path_info.type,
             path_info.folder_id,
             path_info.envelope_id,
@@ -1735,8 +1981,11 @@ class DoughApplication {
                 this.transaction_envelope_label(txn)
             if (haystack.tolower().find(needle) == null) return false
         }
-        if (start_date != null && start_date.len() > 0 && txn.date < start_date) return false
-        if (end_date != null && end_date.len() > 0 && txn.date > end_date) return false
+        local txn_date = this.normalized_date_text(txn.date, "")
+        local normalized_start = this.normalized_date_text(start_date)
+        local normalized_end = this.normalized_date_text(end_date)
+        if (normalized_start != null && txn_date < normalized_start) return false
+        if (normalized_end != null && txn_date > normalized_end) return false
         if (account_filter != null && account_filter.len() > 0 && !txn.affects_account(account_filter)) return false
         if (type_filter != null && type_filter.len() > 0 && txn.type != type_filter) return false
         if (path_filter != null && path_filter.len() > 0) {
@@ -1801,7 +2050,7 @@ class DoughApplication {
         box.set_margin_start(10)
         box.set_margin_end(10)
 
-        local date_label = Gtk.Label.new(txn.date)
+        local date_label = Gtk.Label.new(this.normalized_date_text(txn.date, txn.date))
         date_label.set_xalign(0.0)
         date_label.set_size_request(96, -1)
         box.append(date_label)
@@ -1863,7 +2112,7 @@ class DoughApplication {
             "report.png")
 
         local date_entry = Gtk.Entry.new()
-        date_entry.set_text(txn.date)
+        date_entry.set_text(this.normalized_date_text(txn.date, txn.date))
         date_entry.set_tooltip_text("Transaction date in YYYY-MM-DD format.")
         root.append(this.labeled_control("Date", this.date_picker(date_entry)))
 
@@ -1888,7 +2137,8 @@ class DoughApplication {
             0))
         envelope_dropdown.set_sensitive(selected_type != "transfer")
         envelope_dropdown.set_tooltip_text("Choose the envelope this transaction belongs to.")
-        root.append(this.labeled_control("Envelope", envelope_dropdown))
+        local envelope_row = this.labeled_control("Envelope", envelope_dropdown)
+        root.append(envelope_row)
 
         local refresh_envelope_dropdown = function(preferred_path = null) {
             local current_type = this.dropdown_value(type_values, type_dropdown, txn.type)
@@ -1899,10 +2149,6 @@ class DoughApplication {
             envelope_dropdown.set_selected(this.index_for_value(envelope_opts.paths, wanted, 0))
             envelope_dropdown.set_sensitive(current_type != "transfer")
         }.bindenv(this)
-
-        type_dropdown.connect("notify::selected", function(_) {
-            refresh_envelope_dropdown()
-        })
 
         local description_entry = Gtk.Entry.new()
         description_entry.set_text(txn.description)
@@ -1918,9 +2164,23 @@ class DoughApplication {
         local transfer_dropdown = Gtk.DropDown.new(Gtk.StringList.new(transfer_opts.labels), null)
         transfer_dropdown.set_selected(this.index_for_value(transfer_opts.ids, txn.transfer_account_id, 0))
         transfer_dropdown.set_tooltip_text("Choose the destination account for transfers.")
-        root.append(this.labeled_control("Transfer to", transfer_dropdown))
+        local transfer_row = this.labeled_control("Transfer to", transfer_dropdown)
+        root.append(transfer_row)
+
+        local refresh_transaction_editor_visibility = function() {
+            local current_type = this.dropdown_value(type_values, type_dropdown, txn.type)
+            envelope_row.set_visible(current_type != "transfer")
+            transfer_row.set_visible(current_type == "transfer")
+        }.bindenv(this)
+
+        type_dropdown.connect("notify::selected", function(_) {
+            refresh_envelope_dropdown()
+            refresh_transaction_editor_visibility()
+        })
+        refresh_transaction_editor_visibility()
 
         local actions = Gtk.Box.new(Gtk.Orientation.horizontal, 8)
+        actions.set_halign(Gtk.Align.end)
         actions.append(this.ui.plain_button("Auto-envelope", function() {
             local selected_type = this.dropdown_value(type_values, type_dropdown, txn.type)
             local rule = this.match_import_rule(description_entry.get_text(), selected_type)
@@ -1943,12 +2203,14 @@ class DoughApplication {
                 return
             }
 
-            if (this.iso_date_time(date_entry.get_text()) == null) {
+            local normalized_date = this.normalized_date_text(date_entry.get_text())
+            if (normalized_date == null) {
                 this.set_status("Choose a valid transaction date.")
                 return
             }
 
-            txn.date = date_entry.get_text()
+            date_entry.set_text(normalized_date)
+            txn.date = normalized_date
             txn.account_id = this.dropdown_value(account_opts.ids, account_dropdown)
             txn.type = this.dropdown_value(type_values, type_dropdown, txn.type)
             txn.description = description_entry.get_text()
@@ -1983,7 +2245,7 @@ class DoughApplication {
         }.bindenv(this), "Save this transaction."))
         root.append(actions)
 
-        dialog = this.show_overlay(add_on_save ? "Add Transaction" : "Edit Transaction", root, 680, 480)
+        dialog = this.show_overlay(add_on_save ? "Add Transaction" : "Edit Transaction", root, 720, 620)
     }
 
     function show_transaction_splits(txn) {
@@ -2985,7 +3247,7 @@ class DoughApplication {
         box.append(this.ui.plain_button("Add Envelope", function() {
             local envelope = Models.Envelope(this.make_id("env"), "New Envelope", "")
             folder.add_envelope(envelope)
-            this.add_envelope_catalog_row(list, folder, envelope, type)
+            this.populate_envelope_catalog(list, type)
             this.persist_document("Added envelope.")
         }.bindenv(this)))
 
@@ -3333,7 +3595,7 @@ class DoughApplication {
         reserve_check.set_active(this.document.reserve_enabled)
         reserve_check.set_tooltip_text("Enable or disable the reserve amount in budget calculations.")
         local start_date_entry = Gtk.Entry.new()
-        start_date_entry.set_text(this.document.start_date)
+        start_date_entry.set_text(this.normalized_date_text(this.document.start_date, this.document.start_date))
         start_date_entry.set_tooltip_text("Budget period start date in YYYY-MM-DD format.")
         local period_values = ["weekly", "fortnightly", "monthly"]
         local period_dropdown = Gtk.DropDown.new(Gtk.StringList.new(["Weekly", "Fortnightly", "Monthly"]), null)
@@ -3357,11 +3619,13 @@ class DoughApplication {
             this.document.reserve_enabled = reserve_check.get_active()
             local reserve = this.parse_amount(reserve_entry.get_text())
             if (reserve != null) this.document.reserve_amount = reserve
-            if (this.iso_date_time(start_date_entry.get_text()) == null) {
+            local normalized_start_date = this.normalized_date_text(start_date_entry.get_text())
+            if (normalized_start_date == null) {
                 this.set_status("Choose a valid budget start date.")
                 return
             }
-            this.document.start_date = start_date_entry.get_text()
+            start_date_entry.set_text(normalized_start_date)
+            this.document.start_date = normalized_start_date
             this.document.period_length = this.dropdown_value(period_values, period_dropdown, "monthly")
             this.document.regenerate_periods()
             this.persist_document("Options applied and stored in Spinodb.")
@@ -3372,8 +3636,8 @@ class DoughApplication {
 
     function show_about() {
         local dialog = Gtk.AboutDialog.new()
-        dialog.set_title("About Dough")
-        dialog.set_program_name("Dough")
+        dialog.set_title("About " + DOUGH_APP_NAME)
+        dialog.set_program_name(DOUGH_APP_NAME)
         dialog.set_version(this.version)
         dialog.set_comments("A free personal finance and budgeting application.")
         dialog.set_copyright("Copyright (c) 2026 Camel Software")
@@ -3384,15 +3648,16 @@ class DoughApplication {
 
         if (this.window != null) dialog.set_transient_for(this.window)
 
-        local icon_path = this.assets.path("icon.png")
+        local icon_path = this.assets.path(DOUGH_ICON_NAME + ".png")
+        if (icon_path == null) icon_path = this.assets.path("icon.png")
         if (icon_path != null) {
             try {
                 dialog.set_logo(Gdk.Texture.new_from_filename(icon_path))
             } catch (e) {
-                dialog.set_logo_icon_name("icon")
+                dialog.set_logo_icon_name(DOUGH_ICON_NAME)
             }
         } else {
-            dialog.set_logo_icon_name("icon")
+            dialog.set_logo_icon_name(DOUGH_ICON_NAME)
         }
 
         dialog.present()

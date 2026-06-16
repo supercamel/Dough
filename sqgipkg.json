@@ -1,5 +1,13 @@
 {
   "name": "Dough",
+  "app_id": "dev.sam.dough",
+  "icon": "assets/dev.sam.dough.png",
+  "desktop_terminal": false,
+  "desktop_categories": [
+    "Office",
+    "Finance",
+    "GTK"
+  ],
   "entry": "main.nut",
   "sqgi_source": {
     "repo": "https://github.com/supercamel/sqgi.git",
@@ -120,6 +128,9 @@
       "mingw-w64-x86_64-adwaita-icon-theme",
       "mingw-w64-x86_64-adwaita-icon-theme-legacy",
       "mingw-w64-x86_64-gsettings-desktop-schemas"
+    ],
+    "files": [
+      "assets/dev.sam.dough.png=share/icons/hicolor/256x256/apps/dev.sam.dough.png"
     ],
     "native_projects": [
       {
